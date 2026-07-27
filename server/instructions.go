@@ -56,13 +56,14 @@ users rely on this structure to understand risk before they confirm):
    below), write "Not applicable — no guardrail-constrained Mattermost MCP tools in this
    automation." Otherwise explain why the chosen channel_ids limit Mattermost tool reads/writes
    to what the user should expect.
-   GUARDRAILS ARE REQUIRED (server-enforced) for any ai_prompt step with non-empty allowed_tools
-   when the trigger context is "sensitive": public channels, private channels with more than one
-   member, group messages (GMs), DMs whose other participant is not a bot, or any team-scoped
-   trigger (channel_created, user_joined_team). In these cases the save will be rejected with 403
-   unless guardrails.channel_ids is non-empty — collect the channel_ids from the user up front.
-   Exempt contexts (guardrails optional): DM with the bot itself, single-member private channel,
-   or ai_prompt with no allowed_tools.
+   GUARDRAILS ARE REQUIRED (server-enforced) for any ai_prompt step that includes a
+   guardrail-constrained Mattermost tool (the constrained names listed below) when the trigger
+   context is "sensitive": public channels, private channels with more than one member, group
+   messages (GMs), DMs whose other participant is not a bot, or any team-scoped trigger
+   (channel_created, user_joined_team). In these cases the save will be rejected with 403 unless
+   guardrails.channel_ids is non-empty — collect the channel_ids from the user up front.
+   Exempt contexts (guardrails optional): DM with the bot itself, self-DM, single-member private
+   channel, or an ai_prompt whose allowed_tools has no guardrail-constrained Mattermost tool.
 4. OUTPUT: Where the automation will post results — name the specific channel(s) and include the exact
    message body/template for every send_message action, preserving any template variables so the user can
    verify the content before it is saved.
@@ -184,14 +185,25 @@ Action types:
    - request_as (optional): selects which user the AI completion request — and therefore any
      tool calls made by the agent — is attributed to. Bounded enum, no arbitrary user IDs:
        - "triggerer" (default, also used when omitted): the user who triggered the automation
-         (e.g. the post author for message_posted, the joiner for membership_changed); falls
-         back to the automation creator when the trigger has no associated user (schedule and
-         channel_created triggers always attribute to the creator).
+         (e.g. the post author for message_posted); falls back to the automation creator when
+         the trigger has no associated user.
        - "creator": always the automation creator, regardless of who triggered the run.
      The agent runs with the resolved user's permissions, so picking "creator" in a shared
      channel lets every triggerer exercise the creator's access — only choose "creator" when
      the automation needs to act with the creator's elevated permissions and the user
      understands that. Any other value is rejected at create/update time.
+     REQUEST_AS BY TRIGGER:
+       - message_posted: "triggerer" (the post author) or "creator" — both allowed.
+       - schedule: no triggering user, so the run always attributes to the creator regardless
+         of request_as.
+       - membership_changed, user_joined_team, channel_created: request_as MUST be "creator";
+         "triggerer" or an unset value is rejected at create/update (and legacy automations
+         still set to "triggerer" fail at execution).
+     CREATOR-ONLY TOOLS: some built-in Mattermost tools may run ONLY as the creator and are
+     rejected (at create/update and execution) when request_as is "triggerer" or unset —
+     add_user_to_channel and create_channel (they write on the acting user's behalf), and
+     search_users, list_agents, and get_user_channels (they cannot be constrained by channel
+     guardrails). If an automation needs any of these, set request_as to "creator".
    TOOL SELECTION: Use bridge agent tools discovery or list_tools; copy each tool's name from the response.
    DYNAMIC DISCOVERY: The AI agent can use its tools at runtime to discover resources (e.g., find channels, look up users) — don't hardcode IDs into the prompt when the agent can discover them dynamically each run. This keeps automations resilient to changes like new channels being added.
    NOTE: "web_search" is NOT a valid tool name in allowed_tools. Web search is a native provider feature that works automatically if the agent has it enabled — do not include it in allowed_tools.

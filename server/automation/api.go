@@ -149,6 +149,18 @@ func (h *APIHandler) handleCreateAutomation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Creator-locked triggers require request_as=creator; reject
+	// triggerer/default so the restriction is explicit rather than silent.
+	if err := model.ValidateCreatorLockedRequestAs(&f); err != nil {
+		httputil.WriteErrorJSON(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	if err := rejectBotAIPromptCreator(h.api, f.CreatedBy, &f); err != nil {
+		httputil.WriteErrorJSON(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
 	if err := permissions.CheckAutomationPermissions(h.api, f.CreatedBy, &f); err != nil {
 		msg, code, detail := permissions.HandlePermissionError(h.api, err, f.CreatedBy, f.ID)
 		httputil.WriteErrorJSON(w, code, msg, detail)
@@ -172,7 +184,16 @@ func (h *APIHandler) handleCreateAutomation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := permissions.CheckGuardrailsRequired(h.api, &f); err != nil {
+	// Runs after ValidateAllowedTools so a blocked or unavailable tool is
+	// reported as such rather than as a request_as problem.
+	if err := hooks.ValidateCreatorOnlyToolsForTriggerer(&f); err != nil {
+		httputil.WriteErrorJSON(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	// No triggering user exists at configuration time, so the exempt-triggerer
+	// dimension does not apply here.
+	if err := permissions.CheckGuardrailsRequired(h.api, &f, ""); err != nil {
 		msg, code, detail := permissions.HandlePermissionError(h.api, err, f.CreatedBy, f.ID)
 		httputil.WriteErrorJSON(w, code, msg, detail)
 		return
@@ -299,6 +320,18 @@ func (h *APIHandler) handleUpdateAutomation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Creator-locked triggers require request_as=creator; reject
+	// triggerer/default so the restriction is explicit rather than silent.
+	if err := model.ValidateCreatorLockedRequestAs(&f); err != nil {
+		httputil.WriteErrorJSON(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	if err := rejectBotAIPromptCreator(h.api, f.CreatedBy, &f); err != nil {
+		httputil.WriteErrorJSON(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
 	if err := ValidateTrigger(h.registry, &f.Trigger, &existing.Trigger); err != nil {
 		httputil.WriteErrorJSON(w, http.StatusBadRequest, err.Error(), "")
 		return
@@ -341,7 +374,16 @@ func (h *APIHandler) handleUpdateAutomation(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := permissions.CheckGuardrailsRequired(h.api, &f); err != nil {
+	// Runs after ValidateAllowedTools so a blocked or unavailable tool is
+	// reported as such rather than as a request_as problem.
+	if err := hooks.ValidateCreatorOnlyToolsForTriggerer(&f); err != nil {
+		httputil.WriteErrorJSON(w, http.StatusBadRequest, err.Error(), "")
+		return
+	}
+
+	// No triggering user exists at configuration time, so the exempt-triggerer
+	// dimension does not apply here.
+	if err := permissions.CheckGuardrailsRequired(h.api, &f, ""); err != nil {
 		msg, code, detail := permissions.HandlePermissionError(h.api, err, existing.CreatedBy, id)
 		httputil.WriteErrorJSON(w, code, msg, detail)
 		return
@@ -414,4 +456,32 @@ func (h *APIHandler) handleDeleteAutomation(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// rejectBotAIPromptCreator rejects automations that contain an ai_prompt action
+// when the automation creator is a bot account. Bot accounts must not own AI
+// automations so the resolved ai_prompt user can never be a bot via the creator
+// path. Transient GetUser failures surface as errors so we fail closed.
+func rejectBotAIPromptCreator(api plugin.API, creatorID string, f *model.Automation) error {
+	if f == nil || creatorID == "" {
+		return nil
+	}
+	hasAI := false
+	for i := range f.Actions {
+		if f.Actions[i].AIPrompt != nil {
+			hasAI = true
+			break
+		}
+	}
+	if !hasAI {
+		return nil
+	}
+	user, appErr := api.GetUser(creatorID)
+	if appErr != nil {
+		return fmt.Errorf("failed to verify automation creator: %s", appErr.Error())
+	}
+	if user != nil && user.IsBot {
+		return fmt.Errorf("bot accounts cannot create or own automations with ai_prompt actions")
+	}
+	return nil
 }

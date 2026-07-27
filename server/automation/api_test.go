@@ -1044,11 +1044,13 @@ func TestAPI_CreateAutomation_ChannelCreated_AIPromptOnly_NonTeamAdminDenied(t *
 
 	router, _ := setupAPIWithCustomMock(t, api)
 
+	api.On("GetUser", "user1").Return(&mmmodel.User{Id: "user1", IsBot: false}, (*mmmodel.AppError)(nil)).Maybe()
+
 	body := `{
 		"name": "AI on new channels",
 		"enabled": true,
 		"trigger": {"channel_created": {"team_id": "team1"}},
-		"actions": [{"id": "ai-task", "ai_prompt": {"prompt": "summarize", "provider_type": "agent", "provider_id": "bot1"}}]
+		"actions": [{"id": "ai-task", "ai_prompt": {"prompt": "summarize", "provider_type": "agent", "provider_id": "bot1", "request_as": "creator"}}]
 	}`
 
 	w := httptest.NewRecorder()
@@ -1584,6 +1586,7 @@ func adminAPIWithBridge(t *testing.T, userID string, bridge *stubAgentToolsListe
 	api := &plugintest.API{}
 	expectLogCalls(api)
 	api.On("HasPermissionTo", userID, mmmodel.PermissionManageSystem).Return(true)
+	api.On("GetUser", userID).Return(&mmmodel.User{Id: userID, IsBot: false}, (*mmmodel.AppError)(nil)).Maybe()
 	router, store := setupAPIWithBridge(t, api, bridge)
 	return router, store, api
 }
@@ -1592,7 +1595,7 @@ const aiAgentAutomationBody = `{
 	"name": "AI Automation",
 	"enabled": true,
 	"trigger": {"channel_created": {"team_id": "team1"}},
-	"actions": [{"id": "ai-task", "ai_prompt": {"prompt": "summarize", "provider_type": "agent", "provider_id": "bot1"}}]
+	"actions": [{"id": "ai-task", "ai_prompt": {"prompt": "summarize", "provider_type": "agent", "provider_id": "bot1", "request_as": "creator"}}]
 }`
 
 // TestAPI_CreateAutomation_AIPromptAgent_NoAllowedTools_ChecksBridge is the core
@@ -1635,6 +1638,7 @@ func TestAPI_CreateAutomation_AIPromptAgent_BridgeUnavailable(t *testing.T) {
 	api := &plugintest.API{}
 	expectLogCalls(api)
 	api.On("HasPermissionTo", "admin1", mmmodel.PermissionManageSystem).Return(true)
+	api.On("GetUser", "admin1").Return(&mmmodel.User{Id: "admin1", IsBot: false}, (*mmmodel.AppError)(nil)).Maybe()
 
 	router, _ := setupAPIWithCustomMock(t, api) // bridge is nil
 
@@ -1657,7 +1661,7 @@ func TestAPI_CreateAutomation_AIPromptService_SkipsBridge(t *testing.T) {
 		"name": "Service Automation",
 		"enabled": true,
 		"trigger": {"channel_created": {"team_id": "team1"}},
-		"actions": [{"id": "ai-task", "ai_prompt": {"prompt": "summarize", "provider_type": "service", "provider_id": "openai"}}]
+		"actions": [{"id": "ai-task", "ai_prompt": {"prompt": "summarize", "provider_type": "service", "provider_id": "openai", "request_as": "creator"}}]
 	}`
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPost, "/automations", bytes.NewBufferString(body))
@@ -1680,16 +1684,16 @@ func TestAPI_CreateAutomation_AIPromptAgent_DuplicateID_DedupesCalls(t *testing.
 	// Trigger is channel_created so allowed_tools requires guardrails: stub
 	// the channel-permission checks for the guardrail channel.
 	guardrailChannelID := mmmodel.NewId()
-	api.On("GetChannel", guardrailChannelID).Return(&mmmodel.Channel{Id: guardrailChannelID, TeamId: "team1"}, (*mmmodel.AppError)(nil))
-	api.On("HasPermissionToChannel", "admin1", guardrailChannelID, mmmodel.PermissionReadChannel).Return(true)
+	api.On("GetChannel", guardrailChannelID).Return(&mmmodel.Channel{Id: guardrailChannelID, TeamId: "team1", Type: mmmodel.ChannelTypeOpen}, (*mmmodel.AppError)(nil))
+	api.On("GetChannelMember", guardrailChannelID, "admin1").Return(&mmmodel.ChannelMember{ChannelId: guardrailChannelID, UserId: "admin1"}, (*mmmodel.AppError)(nil))
 
 	body := fmt.Sprintf(`{
 		"name": "AI Automation",
 		"enabled": true,
 		"trigger": {"channel_created": {"team_id": "team1"}},
 		"actions": [
-			{"id": "with-tools", "ai_prompt": {"prompt": "p", "provider_type": "agent", "provider_id": "bot1", "allowed_tools": ["search"], "guardrails": {"channel_ids": [%q]}}},
-			{"id": "without-tools", "ai_prompt": {"prompt": "p", "provider_type": "agent", "provider_id": "bot1"}}
+			{"id": "with-tools", "ai_prompt": {"prompt": "p", "provider_type": "agent", "provider_id": "bot1", "request_as": "creator", "allowed_tools": ["search"], "guardrails": {"channel_ids": [%q]}}},
+			{"id": "without-tools", "ai_prompt": {"prompt": "p", "provider_type": "agent", "provider_id": "bot1", "request_as": "creator"}}
 		]
 	}`, guardrailChannelID)
 	w := httptest.NewRecorder()
@@ -1710,6 +1714,7 @@ func TestAPI_CreateAutomation_AIPromptAgent_PermissionFailureSkipsBridge(t *test
 	api.On("HasPermissionTo", "user1", mmmodel.PermissionManageSystem).Return(false)
 	api.On("GetTeam", "team1").Return(&mmmodel.Team{Id: "team1"}, nil)
 	api.On("HasPermissionToTeam", "user1", "team1", mmmodel.PermissionManageTeam).Return(false)
+	api.On("GetUser", "user1").Return(&mmmodel.User{Id: "user1", IsBot: false}, (*mmmodel.AppError)(nil)).Maybe()
 
 	bridge := &stubAgentToolsLister{}
 	router, _ := setupAPIWithBridge(t, api, bridge)
@@ -1733,6 +1738,7 @@ func TestAPI_UpdateAutomation_AIPromptAgent_AccessDenied(t *testing.T) {
 	api := &plugintest.API{}
 	expectLogCalls(api)
 	api.On("HasPermissionTo", "creator1", mmmodel.PermissionManageSystem).Return(true)
+	api.On("GetUser", "creator1").Return(&mmmodel.User{Id: "creator1", IsBot: false}, (*mmmodel.AppError)(nil)).Maybe()
 
 	router, store := setupAPIWithBridge(t, api, bridge)
 
@@ -1743,7 +1749,7 @@ func TestAPI_UpdateAutomation_AIPromptAgent_AccessDenied(t *testing.T) {
 		Trigger:   model.Trigger{ChannelCreated: &model.ChannelCreatedConfig{TeamID: "team1"}},
 		Actions: []model.Action{{
 			ID:       "ai-task",
-			AIPrompt: &model.AIPromptActionConfig{Prompt: "p", ProviderType: "agent", ProviderID: "bot1"},
+			AIPrompt: &model.AIPromptActionConfig{Prompt: "p", ProviderType: "agent", ProviderID: "bot1", RequestAs: "creator"},
 		}},
 	}))
 
@@ -1756,6 +1762,27 @@ func TestAPI_UpdateAutomation_AIPromptAgent_AccessDenied(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `failed to list tools for agent \"bot1\"`)
 	require.Len(t, bridge.calls, 1)
 	assert.Equal(t, "creator1", bridge.calls[0].userID, "PUT must use existing.CreatedBy for the bridge check")
+}
+
+// TestAPI_CreateAutomation_AIPrompt_BotCreatorRejected ensures bot accounts
+// cannot own ai_prompt automations at create time (fail closed before bridge).
+func TestAPI_CreateAutomation_AIPrompt_BotCreatorRejected(t *testing.T) {
+	bridge := &stubAgentToolsLister{tools: []bridgeclient.BridgeToolInfo{}}
+	api := &plugintest.API{}
+	expectLogCalls(api)
+	api.On("HasPermissionTo", "bot1", mmmodel.PermissionManageSystem).Return(true)
+	api.On("GetUser", "bot1").Return(&mmmodel.User{Id: "bot1", IsBot: true}, (*mmmodel.AppError)(nil))
+
+	router, _ := setupAPIWithBridge(t, api, bridge)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/automations", bytes.NewBufferString(aiAgentAutomationBody))
+	r.Header.Set("Mattermost-User-ID", "bot1")
+	router.ServeHTTP(w, r)
+
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "bot accounts cannot create or own automations with ai_prompt")
+	assert.Empty(t, bridge.calls, "bridge must not be called when the creator is a bot")
 }
 
 // errStore wraps an underlying model.Store and forces SaveWithChannelLimit

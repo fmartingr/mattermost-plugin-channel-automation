@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"maps"
+	"slices"
 	"strings"
 )
 
@@ -26,13 +27,24 @@ type BeforeFunc func(ctx HookCtx, args map[string]any) error
 // this catalog stays the single source of truth for what's known and what's
 // permitted.
 //
+// TriggererSafe marks tools that may run under request_as="triggerer". It is
+// opt-in and fails closed: any tool left at the zero value is creator-only, so
+// a newly added tool is never triggerer-usable by accident. Only channel-scoped
+// read tools that channel guardrails can constrain are marked safe. Tools that
+// borrow write authority from the acting user (add_user_to_channel,
+// create_channel) or that guardrails cannot constrain (search_users,
+// list_agents, get_user_channels) are left unsafe: under request_as=triggerer
+// they would let a lower-privileged creator act with a higher-privileged
+// triggerer's permissions.
+//
 // Before is an optional pre-call guardrail hook. The ai_prompt action only
 // registers a callback URL with the bridge for tools that have a Before
 // implementation. The HTTP handler still fails closed if it's called for a
 // tool without a Before implementation, as defense in depth.
 type MattermostMCPTool struct {
-	Allowed bool
-	Before  BeforeFunc
+	Allowed       bool
+	TriggererSafe bool
+	Before        BeforeFunc
 }
 
 // mattermostMCPServerTools is the exhaustive set of tools registered by the
@@ -66,25 +78,25 @@ type MattermostMCPTool struct {
 // also appear here with Allowed=true.
 var mattermostMCPServerTools = map[string]MattermostMCPTool{
 	// Posts (mcpserver/tools/posts.go — getPostTools)
-	"read_post":     {Allowed: true, Before: beforeReadPost},
+	"read_post":     {Allowed: true, TriggererSafe: true, Before: beforeReadPost},
 	"create_post":   {Allowed: false},
 	"dm":            {Allowed: false},
 	"group_message": {Allowed: false},
 
 	// Channels (mcpserver/tools/channels.go — getChannelTools)
-	"read_channel":        {Allowed: true, Before: beforeReadChannel},
+	"read_channel":        {Allowed: true, TriggererSafe: true, Before: beforeReadChannel},
 	"create_channel":      {Allowed: true, Before: beforeCreateChannel},
-	"get_channel_info":    {Allowed: true, Before: beforeGetChannelInfo},
-	"get_channel_members": {Allowed: true, Before: beforeGetChannelMembers},
+	"get_channel_info":    {Allowed: true, TriggererSafe: true, Before: beforeGetChannelInfo},
+	"get_channel_members": {Allowed: true, TriggererSafe: true, Before: beforeGetChannelMembers},
 	"add_user_to_channel": {Allowed: true, Before: beforeAddUserToChannel},
 	"get_user_channels":   {Allowed: true, Before: beforeGetUserChannels},
 
 	// Teams (mcpserver/tools/teams.go — getTeamTools)
-	"get_team_info":    {Allowed: true, Before: beforeGetTeamInfo},
-	"get_team_members": {Allowed: true, Before: beforeGetTeamMembers},
+	"get_team_info":    {Allowed: true, TriggererSafe: true, Before: beforeGetTeamInfo},
+	"get_team_members": {Allowed: true, TriggererSafe: true, Before: beforeGetTeamMembers},
 
 	// Search (mcpserver/tools/search.go — getSearchTools)
-	"search_posts": {Allowed: true, Before: beforeSearchPosts},
+	"search_posts": {Allowed: true, TriggererSafe: true, Before: beforeSearchPosts},
 	"search_users": {Allowed: true},
 
 	// Agents (mcpserver/tools/agents.go — getAgentTools)
@@ -126,6 +138,33 @@ func IsAllowedMattermostMCPTool(name string) (known, allowed bool) {
 		return false, false
 	}
 	return true, entry.Allowed
+}
+
+// IsCreatorOnlyMattermostMCPTool reports whether the given tool name is a
+// Mattermost MCP tool that may run only as the creator. Catalog tools are
+// creator-only by default and become triggerer-usable only when explicitly
+// marked TriggererSafe, so a newly added tool fails closed. Unknown/external
+// tools return false: they are not Mattermost tools, so this rule does not
+// apply to them (and external tools remain the accepted, separate risk).
+func IsCreatorOnlyMattermostMCPTool(name string) bool {
+	entry, ok := mattermostMCPServerTools[name]
+	return ok && !entry.TriggererSafe
+}
+
+// IsGuardrailConstrainedMattermostMCPTool reports whether the given tool name
+// is a Mattermost MCP tool that channel guardrails actually constrain (its
+// catalog entry has a Before hook). Names may be bare or namespaced as
+// "mattermost__<tool>"; the prefix is stripped before lookup. External tools
+// and unconstrained embedded tools (search_users, list_agents) return false.
+func IsGuardrailConstrainedMattermostMCPTool(name string) bool {
+	entry, ok := mattermostMCPServerTools[strings.TrimPrefix(name, "mattermost__")]
+	return ok && entry.Before != nil
+}
+
+// HasGuardrailConstrainedMattermostMCPTool reports whether any entry in
+// allowedTools is a guardrail-constrained Mattermost MCP tool.
+func HasGuardrailConstrainedMattermostMCPTool(allowedTools []string) bool {
+	return slices.ContainsFunc(allowedTools, IsGuardrailConstrainedMattermostMCPTool)
 }
 
 // MattermostMCPTools returns a copy of the catalog suitable for iteration in

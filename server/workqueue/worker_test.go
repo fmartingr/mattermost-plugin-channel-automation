@@ -535,6 +535,50 @@ func TestWorkerPool_CreatorDeactivated(t *testing.T) {
 	assert.False(t, f.Enabled)
 }
 
+func TestWorkerPool_DisableNotifiesCreator(t *testing.T) {
+	act := &testAction{}
+
+	store, _ := setupStore(t)
+	api := &plugintest.API{}
+	api.On("LogInfo", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("GetUser", "deactivated-user").Return(&mmmodel.User{DeleteAt: 1234567890}, nil)
+
+	registry := automation.NewRegistry()
+	registry.RegisterAction(act)
+	executor := automation.NewExecutor(registry)
+	automationStore := newTestAutomationStore()
+	fakeNotifier := &fakeFailureNotifier{}
+
+	wp := NewWorkerPool(store, executor, automationStore, nil, fakeNotifier, api, 4)
+	wp.pollInterval = 50 * time.Millisecond
+
+	_ = automationStore.Save(&model.Automation{ID: "f1", Name: "Automation 1", Enabled: true, CreatedBy: "deactivated-user", Actions: []model.Action{{ID: "a1", SendMessage: &model.SendMessageActionConfig{}}}})
+
+	item := &model.WorkItem{ID: "w1", AutomationID: "f1", AutomationName: "Automation 1"}
+	require.NoError(t, store.Enqueue(item))
+
+	wp.Start()
+	wp.Notify()
+
+	require.Eventually(t, func() bool {
+		got, _ := store.Get("w1")
+		return got == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	wp.Stop()
+
+	// The creator must be DMed exactly once with the disable reason.
+	disabled := fakeNotifier.disabledSnapshot()
+	require.Len(t, disabled, 1)
+	assert.Equal(t, "f1", disabled[0].AutomationID)
+	assert.Equal(t, "deactivated-user", disabled[0].CreatedBy)
+	assert.Contains(t, disabled[0].Reason, "deactivated")
+	// A disable is not an execution failure, so no failure DM should fire.
+	assert.Empty(t, fakeNotifier.snapshot())
+}
+
 func TestWorkerPool_CreatorPermissionDemoted(t *testing.T) {
 	act := &testAction{}
 
@@ -636,10 +680,181 @@ func TestWorkerPool_CreatorPermissionCheckTransientError(t *testing.T) {
 	assert.True(t, f.Enabled)
 }
 
-// fakeFailureNotifier records all NotifyFailure calls for assertions.
+func TestWorkerPool_GuardrailsBecameRequired_Disables(t *testing.T) {
+	act := &testAction{}
+
+	store, _ := setupStore(t)
+	api := &plugintest.API{}
+	api.On("LogInfo", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("GetUser", "creator1").Return(&mmmodel.User{DeleteAt: 0}, nil)
+	api.On("HasPermissionTo", "creator1", mock.Anything).Return(true)
+	// A private channel that has since gained a second member.
+	api.On("GetChannel", "ch1").Return(&mmmodel.Channel{Id: "ch1", Type: mmmodel.ChannelTypePrivate}, nil)
+	api.On("GetChannelMember", "ch1", "creator1").Return(&mmmodel.ChannelMember{}, nil)
+	api.On("GetChannelStats", "ch1").Return(&mmmodel.ChannelStats{MemberCount: 2}, nil)
+
+	registry := automation.NewRegistry()
+	registry.RegisterAction(act)
+	executor := automation.NewExecutor(registry)
+	automationStore := newTestAutomationStore()
+
+	wp := NewWorkerPool(store, executor, automationStore, nil, nil, api, 4)
+	wp.pollInterval = 50 * time.Millisecond
+
+	_ = automationStore.Save(&model.Automation{
+		ID: "f1", Name: "Automation 1", Enabled: true, CreatedBy: "creator1",
+		Trigger: model.Trigger{MessagePosted: &model.MessagePostedConfig{ChannelID: "ch1"}},
+		Actions: []model.Action{{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
+			Prompt: "summarize", ProviderType: "agent", ProviderID: "bot1",
+			AllowedTools: []string{"search_posts"},
+		}}},
+	})
+
+	item := &model.WorkItem{ID: "w1", AutomationID: "f1", AutomationName: "Automation 1"}
+	require.NoError(t, store.Enqueue(item))
+
+	wp.Start()
+	wp.Notify()
+
+	require.Eventually(t, func() bool {
+		got, _ := store.Get("w1")
+		return got == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	wp.Stop()
+
+	// Action must never run when the context became sensitive without guardrails.
+	assert.Equal(t, 0, act.getExecCount())
+
+	// Automation should be disabled — it now requires guardrails but has none.
+	f, _ := automationStore.Get("f1")
+	require.NotNil(t, f)
+	assert.False(t, f.Enabled)
+}
+
+func TestWorkerPool_UnguardedExemptForeignActor_Disables(t *testing.T) {
+	act := &testAction{}
+
+	store, _ := setupStore(t)
+	api := &plugintest.API{}
+	api.On("LogInfo", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("GetUser", "creator1").Return(&mmmodel.User{DeleteAt: 0}, nil)
+	api.On("HasPermissionTo", "creator1", mock.Anything).Return(true)
+	// Single-member private channel — exempt by context, but the queued event
+	// carries a foreign triggerer, so CheckGuardrailsRequired still rejects it.
+	api.On("GetChannel", "ch1").Return(&mmmodel.Channel{Id: "ch1", Type: mmmodel.ChannelTypePrivate}, nil)
+	api.On("GetChannelMember", "ch1", "creator1").Return(&mmmodel.ChannelMember{}, nil)
+	api.On("GetChannelStats", "ch1").Return(&mmmodel.ChannelStats{MemberCount: 1}, nil)
+
+	registry := automation.NewRegistry()
+	registry.RegisterAction(act)
+	executor := automation.NewExecutor(registry)
+	automationStore := newTestAutomationStore()
+
+	wp := NewWorkerPool(store, executor, automationStore, nil, nil, api, 4)
+	wp.pollInterval = 50 * time.Millisecond
+
+	_ = automationStore.Save(&model.Automation{
+		ID: "f1", Name: "Automation 1", Enabled: true, CreatedBy: "creator1",
+		Trigger: model.Trigger{MessagePosted: &model.MessagePostedConfig{ChannelID: "ch1"}},
+		Actions: []model.Action{{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
+			Prompt: "summarize", ProviderType: "agent", ProviderID: "bot1",
+			RequestAs:    model.AIPromptRequestAsTriggerer,
+			AllowedTools: []string{"search_posts"},
+		}}},
+	})
+
+	// The queued event captured a foreign triggerer before membership fell back
+	// to a single member.
+	item := &model.WorkItem{
+		ID: "w1", AutomationID: "f1", AutomationName: "Automation 1",
+		TriggerData: model.TriggerData{User: &model.SafeUser{Id: "intruder"}},
+	}
+	require.NoError(t, store.Enqueue(item))
+
+	wp.Start()
+	wp.Notify()
+
+	require.Eventually(t, func() bool {
+		got, _ := store.Get("w1")
+		return got == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	wp.Stop()
+
+	// The action must not run under the foreign triggerer's identity.
+	assert.Equal(t, 0, act.getExecCount())
+
+	// The automation is disabled — a foreign triggerer is treated the same as a
+	// context that became sensitive: fail closed until the creator re-saves.
+	f, _ := automationStore.Get("f1")
+	require.NotNil(t, f)
+	assert.False(t, f.Enabled)
+}
+
+func TestWorkerPool_GuardrailsCheckTransientError(t *testing.T) {
+	act := &testAction{}
+
+	store, _ := setupStore(t)
+	api := &plugintest.API{}
+	api.On("LogInfo", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("LogWarn", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("GetUser", "creator1").Return(&mmmodel.User{DeleteAt: 0}, nil)
+	api.On("HasPermissionTo", "creator1", mock.Anything).Return(true)
+	api.On("GetChannel", "ch1").Return(&mmmodel.Channel{Id: "ch1", Type: mmmodel.ChannelTypePrivate}, nil)
+	api.On("GetChannelMember", "ch1", "creator1").Return(&mmmodel.ChannelMember{}, nil)
+	// GetChannelStats returns a 500 — transient infrastructure error.
+	api.On("GetChannelStats", "ch1").Return(nil, mmmodel.NewAppError("GetChannelStats", "app.channel.get_stats.app_error", nil, "", 500))
+
+	registry := automation.NewRegistry()
+	registry.RegisterAction(act)
+	executor := automation.NewExecutor(registry)
+	automationStore := newTestAutomationStore()
+
+	wp := NewWorkerPool(store, executor, automationStore, nil, nil, api, 4)
+	wp.pollInterval = 50 * time.Millisecond
+
+	_ = automationStore.Save(&model.Automation{
+		ID: "f1", Name: "Automation 1", Enabled: true, CreatedBy: "creator1",
+		Trigger: model.Trigger{MessagePosted: &model.MessagePostedConfig{ChannelID: "ch1"}},
+		Actions: []model.Action{{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
+			Prompt: "summarize", ProviderType: "agent", ProviderID: "bot1",
+			AllowedTools: []string{"search_posts"},
+		}}},
+	})
+
+	item := &model.WorkItem{ID: "w1", AutomationID: "f1", AutomationName: "Automation 1"}
+	require.NoError(t, store.Enqueue(item))
+
+	wp.Start()
+	wp.Notify()
+
+	require.Eventually(t, func() bool {
+		got, _ := store.Get("w1")
+		return got == nil
+	}, 5*time.Second, 10*time.Millisecond)
+
+	wp.Stop()
+
+	// Action must not run while the sensitivity of the context is unverifiable.
+	assert.Equal(t, 0, act.getExecCount())
+
+	// Automation should remain enabled — this is a transient error.
+	f, _ := automationStore.Get("f1")
+	require.NotNil(t, f)
+	assert.True(t, f.Enabled)
+}
+
+// fakeFailureNotifier records all NotifyFailure and NotifyDisabled calls for assertions.
 type fakeFailureNotifier struct {
-	mu    sync.Mutex
-	calls []notifier.FailureDetails
+	mu            sync.Mutex
+	calls         []notifier.FailureDetails
+	disabledCalls []notifier.DisabledDetails
 }
 
 func (f *fakeFailureNotifier) NotifyFailure(d notifier.FailureDetails) {
@@ -648,11 +863,25 @@ func (f *fakeFailureNotifier) NotifyFailure(d notifier.FailureDetails) {
 	f.calls = append(f.calls, d)
 }
 
+func (f *fakeFailureNotifier) NotifyDisabled(d notifier.DisabledDetails) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.disabledCalls = append(f.disabledCalls, d)
+}
+
 func (f *fakeFailureNotifier) snapshot() []notifier.FailureDetails {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]notifier.FailureDetails, len(f.calls))
 	copy(out, f.calls)
+	return out
+}
+
+func (f *fakeFailureNotifier) disabledSnapshot() []notifier.DisabledDetails {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]notifier.DisabledDetails, len(f.disabledCalls))
+	copy(out, f.disabledCalls)
 	return out
 }
 

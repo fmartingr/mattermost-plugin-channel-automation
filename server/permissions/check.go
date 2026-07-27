@@ -150,9 +150,10 @@ func CanEditAutomation(api plugin.API, userID string, f *model.Automation) error
 // automation's creator (CreatedBy): the AI agent runs with the creator's identity at
 // execute time, so a guardrail channel the creator cannot read would silently
 // break the automation. Authorization to edit the automation is enforced separately
-// by CanEditAutomation. There is no sysadmin shortcut here: sysadmins implicitly
-// satisfy PermissionReadChannel on every channel, so the same uniform
-// per-channel check is correct for everyone.
+// by CanEditAutomation.
+//
+// Access requires actual channel membership for every channel type — public,
+// private, group, and direct — for everyone including system admins.
 func CheckGuardrailChannelPermissions(api plugin.API, userID string, f *model.Automation) error {
 	seen := make(map[string]struct{})
 	for i := range f.Actions {
@@ -178,7 +179,11 @@ func CheckGuardrailChannelPermissions(api plugin.API, userID string, f *model.Au
 				}
 				return fmt.Errorf("you do not have permission to read one or more channels referenced by ai_prompt guardrails")
 			}
-			if !api.HasPermissionToChannel(userID, c.ChannelID, mmmodel.PermissionReadChannel) {
+
+			if _, appErr := api.GetChannelMember(c.ChannelID, userID); appErr != nil {
+				if appErr.StatusCode >= http.StatusInternalServerError {
+					return fmt.Errorf("failed to verify guardrail channel membership: %w", appErr)
+				}
 				return fmt.Errorf("you do not have permission to read one or more channels referenced by ai_prompt guardrails")
 			}
 		}

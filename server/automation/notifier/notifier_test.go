@@ -175,3 +175,71 @@ func TestNotifyFailure_NoOpWhenCooldownStoreMissing(t *testing.T) {
 	n.NotifyFailure(sampleDetails()) // must not panic, must not touch api
 	api.AssertNotCalled(t, "GetDirectChannel", mock.Anything, mock.Anything)
 }
+
+func sampleDisabledDetails() DisabledDetails {
+	return DisabledDetails{
+		AutomationID:   "auto1",
+		AutomationName: "My Automation",
+		CreatedBy:      "creator1",
+		Reason:         "automation now requires guardrails.channel_ids but has none",
+	}
+}
+
+func TestNotifyDisabled_SendsDMWithReason(t *testing.T) {
+	api := &plugintest.API{}
+	cooldown := &fakeCooldownStore{}
+	// Disabled DMs use a namespaced cooldown key so they never collide with
+	// failure DMs for the same automation.
+	cooldown.On("Claim", "disabled_auto1").Return(true, nil)
+	api.On("GetDirectChannel", "creator1", "bot1").Return(&mmmodel.Channel{Id: "dm1"}, nil)
+	api.On("CreatePost", mock.MatchedBy(func(p *mmmodel.Post) bool {
+		return p.UserId == "bot1" &&
+			p.ChannelId == "dm1" &&
+			strings.Contains(p.Message, "My Automation") &&
+			strings.Contains(p.Message, "disabled") &&
+			strings.Contains(p.Message, "requires guardrails.channel_ids") &&
+			strings.Contains(p.Message, "auto1")
+	})).Return(&mmmodel.Post{Id: "p1"}, nil)
+
+	n := NewCreatorNotifier(api, cooldown, "bot1")
+	n.NotifyDisabled(sampleDisabledDetails())
+
+	api.AssertExpectations(t)
+	cooldown.AssertExpectations(t)
+	cooldown.AssertNotCalled(t, "Release", mock.Anything)
+}
+
+func TestNotifyDisabled_SkipsWhenCooldownActive(t *testing.T) {
+	api := &plugintest.API{}
+	cooldown := &fakeCooldownStore{}
+	cooldown.On("Claim", "disabled_auto1").Return(false, nil)
+
+	n := NewCreatorNotifier(api, cooldown, "bot1")
+	n.NotifyDisabled(sampleDisabledDetails())
+
+	cooldown.AssertExpectations(t)
+	api.AssertNotCalled(t, "GetDirectChannel", mock.Anything, mock.Anything)
+	api.AssertNotCalled(t, "CreatePost", mock.Anything)
+}
+
+func TestNotifyDisabled_ReleasesCooldownOnCreatePostFailure(t *testing.T) {
+	api := &plugintest.API{}
+	cooldown := &fakeCooldownStore{}
+	cooldown.On("Claim", "disabled_auto1").Return(true, nil)
+	cooldown.On("Release", "disabled_auto1").Return(nil)
+	api.On("GetDirectChannel", "creator1", "bot1").Return(&mmmodel.Channel{Id: "dm1"}, nil)
+	api.On("CreatePost", mock.Anything).
+		Return((*mmmodel.Post)(nil), mmmodel.NewAppError("CreatePost", "post.fail", nil, "boom", 500))
+	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+
+	n := NewCreatorNotifier(api, cooldown, "bot1")
+	n.NotifyDisabled(sampleDisabledDetails())
+
+	api.AssertExpectations(t)
+	cooldown.AssertExpectations(t)
+}
+
+func TestNotifyDisabled_NilSafe(t *testing.T) {
+	var n *CreatorNotifier
+	n.NotifyDisabled(sampleDisabledDetails()) // must not panic
+}
