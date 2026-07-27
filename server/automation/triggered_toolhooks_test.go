@@ -50,6 +50,9 @@ func TestTriggeredAutomation_BridgeRequestIncludesBeforeHooksForBothToolForms(t 
 	api := &plugintest.API{}
 	api.On("GetChannel", channelID).Return(&mmmodel.Channel{Id: channelID, Name: "n", TeamId: teamID}, (*mmmodel.AppError)(nil)).Maybe()
 	api.On("GetUser", "u1").Return(&mmmodel.User{Id: "u1", Username: "alice"}, (*mmmodel.AppError)(nil)).Maybe()
+	// add_user_to_channel is creator-only, so the action runs as the creator;
+	// the executor resolves and verifies that user.
+	api.On("GetUser", "creator1").Return(&mmmodel.User{Id: "creator1", Username: "creator"}, (*mmmodel.AppError)(nil)).Maybe()
 	api.On("PublishUserTyping", mock.Anything, mock.Anything, mock.Anything).Return((*mmmodel.AppError)(nil)).Maybe()
 	for _, n := range []int{1, 3, 5, 7, 9, 11, 13, 15} {
 		args := make([]any, n)
@@ -79,6 +82,8 @@ func TestTriggeredAutomation_BridgeRequestIncludesBeforeHooksForBothToolForms(t 
 				Prompt:       "q",
 				ProviderType: model.AIProviderTypeAgent,
 				ProviderID:   "bot1",
+				// add_user_to_channel is creator-only, so this must run as creator.
+				RequestAs:    model.AIPromptRequestAsCreator,
 				AllowedTools: []string{"search_posts", "mattermost__add_user_to_channel"},
 				Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{
 					{ChannelID: channelID, TeamID: teamID},
