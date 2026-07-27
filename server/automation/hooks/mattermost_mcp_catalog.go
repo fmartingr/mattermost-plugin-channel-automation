@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"maps"
+	"slices"
 	"strings"
 )
 
@@ -147,12 +148,7 @@ func IsGuardrailConstrainedMattermostMCPTool(name string) bool {
 // HasGuardrailConstrainedMattermostMCPTool reports whether any entry in
 // allowedTools is a guardrail-constrained Mattermost MCP tool.
 func HasGuardrailConstrainedMattermostMCPTool(allowedTools []string) bool {
-	for _, name := range allowedTools {
-		if IsGuardrailConstrainedMattermostMCPTool(name) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(allowedTools, IsGuardrailConstrainedMattermostMCPTool)
 }
 
 // MattermostMCPTools returns a copy of the catalog suitable for iteration in
