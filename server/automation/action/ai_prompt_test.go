@@ -71,6 +71,8 @@ func newTestAPI() *plugintest.API {
 	api := &plugintest.API{}
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	// Default: any resolved ai_prompt user is a non-bot human.
+	api.On("GetUser", mock.Anything).Return(&mmmodel.User{Id: "user1", Username: "user1", IsBot: false}, nil).Maybe()
 	return api
 }
 
@@ -384,6 +386,7 @@ func TestAIPromptAction_Execute_ToolHooksGuardrails(t *testing.T) {
 			Prompt:       "q",
 			ProviderType: "agent",
 			ProviderID:   "ai-bot",
+			RequestAs:    "creator",
 			AllowedTools: []string{"search_posts", "add_user_to_channel", "external_search"},
 			Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{{
 				ChannelID: chID,
@@ -444,6 +447,7 @@ func TestAIPromptAction_Execute_ToolHooksGuardrailsNamespaced(t *testing.T) {
 			Prompt:       "q",
 			ProviderType: "agent",
 			ProviderID:   "ai-bot",
+			RequestAs:    "creator",
 			AllowedTools: []string{"mattermost__search_posts", "mattermost__add_user_to_channel", "external__search_posts"},
 			Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{{
 				ChannelID: mmmodel.NewId(),
@@ -1114,10 +1118,37 @@ func TestAIPromptAction_Execute_RequestAs(t *testing.T) {
 			name:      "membership_changed with explicit creator uses creator",
 			requestAs: "creator",
 			ctx: &model.AutomationContext{
-				CreatedBy: "automation-creator-id",
+				CreatedBy:   "automation-creator-id",
+				TriggerType: model.TriggerTypeMembershipChanged,
 				Trigger: model.TriggerData{
 					User:       &model.SafeUser{Id: "triggering-user-id"},
 					Membership: &model.MembershipInfo{Action: "joined"},
+				},
+				Steps: make(map[string]model.StepOutput),
+			},
+			want: "automation-creator-id",
+		},
+		{
+			name:      "user_joined_team with explicit creator uses creator",
+			requestAs: "creator",
+			ctx: &model.AutomationContext{
+				CreatedBy:   "automation-creator-id",
+				TriggerType: model.TriggerTypeUserJoinedTeam,
+				Trigger: model.TriggerData{
+					User: &model.SafeUser{Id: "joining-user-id"},
+				},
+				Steps: make(map[string]model.StepOutput),
+			},
+			want: "automation-creator-id",
+		},
+		{
+			name:      "channel_created with explicit creator uses creator",
+			requestAs: "creator",
+			ctx: &model.AutomationContext{
+				CreatedBy:   "automation-creator-id",
+				TriggerType: model.TriggerTypeChannelCreated,
+				Trigger: model.TriggerData{
+					User: &model.SafeUser{Id: "channel-creator-id"},
 				},
 				Steps: make(map[string]model.StepOutput),
 			},
@@ -1148,38 +1179,230 @@ func TestAIPromptAction_Execute_RequestAs(t *testing.T) {
 	}
 }
 
-func TestAIPromptAction_Execute_MembershipChangedRejectsTriggerer(t *testing.T) {
-	for _, requestAs := range []string{"triggerer", ""} {
-		t.Run("request_as="+requestAs, func(t *testing.T) {
-			api := newTestAPI()
-			bc := &mockBridgeClient{agentResponse: "ok"}
-			a := NewAIPromptAction(api, bc, "")
-
-			act := &model.Action{
-				ID: "ai1",
-				AIPrompt: &model.AIPromptActionConfig{
-					Prompt:       "hello",
-					ProviderType: "agent",
-					ProviderID:   "ai-bot",
-					RequestAs:    requestAs,
-				},
-			}
-			ctx := &model.AutomationContext{
-				CreatedBy: "automation-creator-id",
-				Trigger: model.TriggerData{
-					User:       &model.SafeUser{Id: "triggering-user-id"},
-					Membership: &model.MembershipInfo{Action: "joined"},
-				},
-				Steps: make(map[string]model.StepOutput),
-			}
-
-			output, err := a.Execute(act, ctx)
-			require.Error(t, err)
-			assert.Nil(t, output)
-			assert.Contains(t, err.Error(), "membership_changed")
-			assert.Empty(t, bc.lastReq.UserID, "bridge must not be called when validation fails")
-		})
+func TestAIPromptAction_Execute_CreatorLockedRejectsTriggerer(t *testing.T) {
+	cases := []struct {
+		triggerType string
+		membership  *model.MembershipInfo
+	}{
+		{model.TriggerTypeMembershipChanged, &model.MembershipInfo{Action: "joined"}},
+		{model.TriggerTypeUserJoinedTeam, nil},
+		{model.TriggerTypeChannelCreated, nil},
 	}
+	for _, tc := range cases {
+		for _, requestAs := range []string{"triggerer", ""} {
+			t.Run(tc.triggerType+"/request_as="+requestAs, func(t *testing.T) {
+				api := newTestAPI()
+				bc := &mockBridgeClient{agentResponse: "ok"}
+				a := NewAIPromptAction(api, bc, "")
+
+				act := &model.Action{
+					ID: "ai1",
+					AIPrompt: &model.AIPromptActionConfig{
+						Prompt:       "hello",
+						ProviderType: "agent",
+						ProviderID:   "ai-bot",
+						RequestAs:    requestAs,
+					},
+				}
+				ctx := &model.AutomationContext{
+					CreatedBy:   "automation-creator-id",
+					TriggerType: tc.triggerType,
+					Trigger: model.TriggerData{
+						User:       &model.SafeUser{Id: "triggering-user-id"},
+						Membership: tc.membership,
+					},
+					Steps: make(map[string]model.StepOutput),
+				}
+
+				output, err := a.Execute(act, ctx)
+				require.Error(t, err)
+				assert.Nil(t, output)
+				assert.Contains(t, err.Error(), "must set request_as")
+				assert.Empty(t, bc.lastReq.UserID, "bridge must not be called when validation fails")
+			})
+		}
+	}
+}
+
+func TestAIPromptAction_Execute_RejectsBotUser(t *testing.T) {
+	t.Run("bot triggerer", func(t *testing.T) {
+		api := &plugintest.API{}
+		api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+		api.On("GetUser", "bot-triggerer").Return(&mmmodel.User{Id: "bot-triggerer", IsBot: true}, nil)
+
+		bc := &mockBridgeClient{agentResponse: "ok"}
+		a := NewAIPromptAction(api, bc, "")
+		act := &model.Action{
+			ID: "ai1",
+			AIPrompt: &model.AIPromptActionConfig{
+				Prompt: "hello", ProviderType: "agent", ProviderID: "ai-bot",
+				RequestAs: "triggerer",
+			},
+		}
+		ctx := &model.AutomationContext{
+			CreatedBy:   "automation-creator-id",
+			TriggerType: model.TriggerTypeMessagePosted,
+			Trigger:     model.TriggerData{User: &model.SafeUser{Id: "bot-triggerer"}},
+			Steps:       make(map[string]model.StepOutput),
+		}
+		output, err := a.Execute(act, ctx)
+		require.Error(t, err)
+		assert.Nil(t, output)
+		assert.Contains(t, err.Error(), "cannot run as bot")
+		assert.Empty(t, bc.lastReq.UserID)
+	})
+
+	t.Run("bot creator", func(t *testing.T) {
+		api := &plugintest.API{}
+		api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+		api.On("GetUser", "bot-creator").Return(&mmmodel.User{Id: "bot-creator", IsBot: true}, nil)
+
+		bc := &mockBridgeClient{agentResponse: "ok"}
+		a := NewAIPromptAction(api, bc, "")
+		act := &model.Action{
+			ID: "ai1",
+			AIPrompt: &model.AIPromptActionConfig{
+				Prompt: "hello", ProviderType: "agent", ProviderID: "ai-bot",
+				RequestAs: "creator",
+			},
+		}
+		ctx := &model.AutomationContext{
+			CreatedBy:   "bot-creator",
+			TriggerType: model.TriggerTypeMessagePosted,
+			Trigger:     model.TriggerData{User: &model.SafeUser{Id: "human"}},
+			Steps:       make(map[string]model.StepOutput),
+		}
+		output, err := a.Execute(act, ctx)
+		require.Error(t, err)
+		assert.Nil(t, output)
+		assert.Contains(t, err.Error(), "cannot run as bot")
+		assert.Empty(t, bc.lastReq.UserID)
+	})
+
+	t.Run("lookup error fails closed", func(t *testing.T) {
+		api := &plugintest.API{}
+		api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+		api.On("GetUser", "creator1").Return(nil, mmmodel.NewAppError("GetUser", "app.user.get.app_error", nil, "", 500))
+
+		bc := &mockBridgeClient{agentResponse: "ok"}
+		a := NewAIPromptAction(api, bc, "")
+		act := &model.Action{
+			ID: "ai1",
+			AIPrompt: &model.AIPromptActionConfig{
+				Prompt: "hello", ProviderType: "agent", ProviderID: "ai-bot",
+				RequestAs: "creator",
+			},
+		}
+		ctx := &model.AutomationContext{
+			CreatedBy:   "creator1",
+			TriggerType: model.TriggerTypeSchedule,
+			Steps:       make(map[string]model.StepOutput),
+		}
+		output, err := a.Execute(act, ctx)
+		require.Error(t, err)
+		assert.Nil(t, output)
+		assert.Contains(t, err.Error(), "failed to verify ai_prompt user")
+		assert.Empty(t, bc.lastReq.UserID)
+	})
+}
+
+func TestAIPromptAction_Execute_CreatorOnlyToolsRequireCreator(t *testing.T) {
+	api := newTestAPI()
+	// The tool must be available so allowed_tools re-validation passes and the
+	// creator-only gate (which now runs after it) is what rejects the run.
+	bc := &mockBridgeClient{agentResponse: "ok", agentTools: []bridgeclient.BridgeToolInfo{mmTool("search_users")}}
+	a := NewAIPromptAction(api, bc, "")
+
+	act := &model.Action{
+		ID: "ai1",
+		AIPrompt: &model.AIPromptActionConfig{
+			Prompt:       "hello",
+			ProviderType: "agent",
+			ProviderID:   "ai-bot",
+			RequestAs:    "triggerer",
+			AllowedTools: []string{"search_users"},
+		},
+	}
+	ctx := &model.AutomationContext{
+		CreatedBy:   "automation-creator-id",
+		TriggerType: model.TriggerTypeMessagePosted,
+		Trigger:     model.TriggerData{User: &model.SafeUser{Id: "poster-id"}},
+		Steps:       make(map[string]model.StepOutput),
+	}
+	output, err := a.Execute(act, ctx)
+	require.Error(t, err)
+	assert.Nil(t, output)
+	assert.Contains(t, err.Error(), "requires request_as")
+	assert.Empty(t, bc.lastReq.UserID)
+}
+
+// TestAIPromptAction_Execute_UnguardedExternalToolAllowsTriggerer verifies that
+// external / unconstrained tools are unaffected by the creator-only rule and
+// may run as the triggerer without guardrails.
+func TestAIPromptAction_Execute_UnguardedExternalToolAllowsTriggerer(t *testing.T) {
+	api := newTestAPI()
+	bc := &mockBridgeClient{
+		agentResponse: "ok",
+		agentTools: []bridgeclient.BridgeToolInfo{{
+			Name: "external__search", ServerOrigin: "external-mcp",
+		}},
+	}
+	a := NewAIPromptAction(api, bc, "")
+
+	act := &model.Action{
+		ID: "ai1",
+		AIPrompt: &model.AIPromptActionConfig{
+			Prompt:       "search external",
+			ProviderType: "agent",
+			ProviderID:   "ai-bot",
+			RequestAs:    model.AIPromptRequestAsTriggerer,
+			AllowedTools: []string{"external__search"},
+		},
+	}
+	ctx := &model.AutomationContext{
+		CreatedBy:   "automation-creator-id",
+		TriggerType: model.TriggerTypeMessagePosted,
+		Trigger:     model.TriggerData{User: &model.SafeUser{Id: "poster-id"}},
+		Steps:       make(map[string]model.StepOutput),
+	}
+
+	output, err := a.Execute(act, ctx)
+	require.NoError(t, err)
+	require.NotNil(t, output)
+	assert.Equal(t, "poster-id", bc.lastReq.UserID)
+}
+
+// TestAIPromptAction_Execute_CreatorOnlyToolsAllowedForSchedule verifies a
+// schedule trigger (which has no triggering user and always resolves to the
+// creator) may use creator-only tools even when request_as is not "creator".
+func TestAIPromptAction_Execute_CreatorOnlyToolsAllowedForSchedule(t *testing.T) {
+	api := newTestAPI()
+	bc := &mockBridgeClient{
+		agentResponse: "ok",
+		agentTools:    []bridgeclient.BridgeToolInfo{mmTool("search_users")},
+	}
+	a := NewAIPromptAction(api, bc, "")
+
+	act := &model.Action{
+		ID: "ai1",
+		AIPrompt: &model.AIPromptActionConfig{
+			Prompt:       "hello",
+			ProviderType: "agent",
+			ProviderID:   "ai-bot",
+			RequestAs:    "triggerer",
+			AllowedTools: []string{"search_users"},
+		},
+	}
+	ctx := &model.AutomationContext{
+		CreatedBy:   "automation-creator-id",
+		TriggerType: model.TriggerTypeSchedule,
+		Trigger:     model.TriggerData{},
+		Steps:       make(map[string]model.StepOutput),
+	}
+	output, err := a.Execute(act, ctx)
+	require.NoError(t, err)
+	require.NotNil(t, output)
+	assert.Equal(t, "automation-creator-id", bc.lastReq.UserID)
 }
 
 func TestAIPromptAction_Execute_UnsupportedProviderType(t *testing.T) {

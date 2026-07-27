@@ -71,17 +71,67 @@ func ValidateSendMessageChannel(automation *Automation) error {
 	return nil
 }
 
-func ValidateMembershipChangedRequestAs(automation *Automation) error {
-	if automation == nil || automation.Trigger.MembershipChanged == nil {
+// CreatorLockedTriggerTypes are the trigger types whose ai_prompt actions must
+// set request_as to "creator". For these triggers the "triggerer" is an
+// incidental subject of the event (joiner/leaver/channel creator), so running
+// the AI with their permissions would let the automation borrow that user's
+// access and surface it to other members.
+var CreatorLockedTriggerTypes = map[string]struct{}{
+	TriggerTypeMembershipChanged: {},
+	TriggerTypeUserJoinedTeam:    {},
+	TriggerTypeChannelCreated:    {},
+}
+
+// IsCreatorLockedTrigger reports whether the automation's trigger type requires
+// ai_prompt request_as=creator.
+func IsCreatorLockedTrigger(automation *Automation) bool {
+	if automation == nil {
+		return false
+	}
+	_, ok := CreatorLockedTriggerTypes[automation.Trigger.Type()]
+	return ok
+}
+
+// ResolvesToTriggerer reports whether an ai_prompt with the given trigger type
+// and request_as could run as a user other than the automation creator. This is
+// the single source of truth for that question:
+//   - request_as "creator" always resolves to the creator.
+//   - schedule triggers have no triggering user, so they resolve to the creator.
+//   - creator-locked triggers (membership_changed, user_joined_team,
+//     channel_created) are pinned to the creator.
+//
+// Only the remaining trigger types (currently message_posted) carry a distinct
+// triggering user the AI can run as. Callers that must forbid borrowing a
+// foreign identity (e.g. creator-only tools) gate on this rule.
+func ResolvesToTriggerer(triggerType, requestAs string) bool {
+	if requestAs == AIPromptRequestAsCreator {
+		return false
+	}
+	if triggerType == TriggerTypeSchedule {
+		return false
+	}
+	if _, locked := CreatorLockedTriggerTypes[triggerType]; locked {
+		return false
+	}
+	return true
+}
+
+// ValidateCreatorLockedRequestAs rejects automations whose trigger is
+// creator-locked and whose ai_prompt actions do not explicitly set request_as
+// to "creator". An empty request_as means "triggerer" and is therefore also
+// rejected: "creator" must be explicit so the behavior is never a surprise.
+func ValidateCreatorLockedRequestAs(automation *Automation) error {
+	if !IsCreatorLockedTrigger(automation) {
 		return nil
 	}
+	triggerType := automation.Trigger.Type()
 	for i := range automation.Actions {
 		ai := automation.Actions[i].AIPrompt
 		if ai == nil {
 			continue
 		}
 		if ai.RequestAs != AIPromptRequestAsCreator {
-			return fmt.Errorf("action %d: membership_changed automations must set request_as to %q (the triggerer is the user whose membership just changed, so the AI cannot run with their permissions)", i, AIPromptRequestAsCreator)
+			return fmt.Errorf("action %d: %s automations must set request_as to %q (the triggerer is an incidental subject of the event, so the AI cannot run with their permissions)", i, triggerType, AIPromptRequestAsCreator)
 		}
 	}
 	return nil

@@ -38,6 +38,7 @@ func (e *Executor) Execute(f *model.Automation, triggerData model.TriggerData) (
 	ctx := &model.AutomationContext{
 		AutomationID: f.ID,
 		CreatedBy:    f.CreatedBy,
+		TriggerType:  f.Trigger.Type(),
 		Trigger:      triggerData,
 		Steps:        make(map[string]model.StepOutput),
 		Actions:      f.Actions,

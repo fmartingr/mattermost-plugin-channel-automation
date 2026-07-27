@@ -55,3 +55,52 @@ func TestIsAllowedMattermostMCPTool_UnknownTool(t *testing.T) {
 	assert.False(t, known)
 	assert.False(t, allowed)
 }
+
+func TestIsCreatorOnlyMattermostMCPTool(t *testing.T) {
+	creatorOnly := []string{"add_user_to_channel", "create_channel", "search_users", "list_agents", "get_user_channels"}
+	for _, name := range creatorOnly {
+		assert.True(t, IsCreatorOnlyMattermostMCPTool(name), "%q should be creator-only", name)
+	}
+	// Only the explicitly TriggererSafe channel-scoped read tools may run as
+	// the triggerer. get_user_channels is excluded: it enumerates the acting
+	// user's memberships and cannot be guardrailed.
+	triggererSafe := []string{
+		"read_post", "read_channel", "get_channel_info", "get_channel_members",
+		"get_team_info", "get_team_members", "search_posts",
+	}
+	for _, name := range triggererSafe {
+		assert.False(t, IsCreatorOnlyMattermostMCPTool(name), "%q should be triggerer-usable", name)
+	}
+	assert.False(t, IsCreatorOnlyMattermostMCPTool("mattermost__search_users"), "namespaced form is stripped by callers, not this helper")
+	assert.False(t, IsCreatorOnlyMattermostMCPTool("not_a_real_tool"))
+}
+
+// TestCatalogFailsClosed asserts the security-critical invariant behind the
+// TriggererSafe flip: every allowed tool that is not explicitly TriggererSafe
+// is treated as creator-only, so a newly added tool defaults to fail-closed.
+func TestCatalogFailsClosed(t *testing.T) {
+	for name, entry := range mattermostMCPServerTools {
+		if entry.Allowed && !entry.TriggererSafe {
+			assert.True(t, IsCreatorOnlyMattermostMCPTool(name), "allowed tool %q without TriggererSafe must be creator-only", name)
+		}
+	}
+}
+
+func TestIsGuardrailConstrainedMattermostMCPTool(t *testing.T) {
+	// Tools with a Before hook are guardrail-constrained.
+	constrained := []string{"search_posts", "read_channel", "add_user_to_channel", "get_team_info", "mattermost__read_post"}
+	for _, name := range constrained {
+		assert.True(t, IsGuardrailConstrainedMattermostMCPTool(name), "%q should be guardrail-constrained", name)
+	}
+	// Embedded but unconstrained (no Before), external, and unknown are not.
+	unconstrained := []string{"search_users", "list_agents", "external__search_posts", "not_a_real_tool"}
+	for _, name := range unconstrained {
+		assert.False(t, IsGuardrailConstrainedMattermostMCPTool(name), "%q should not be guardrail-constrained", name)
+	}
+}
+
+func TestHasGuardrailConstrainedMattermostMCPTool(t *testing.T) {
+	assert.True(t, HasGuardrailConstrainedMattermostMCPTool([]string{"external__search", "search_posts"}))
+	assert.False(t, HasGuardrailConstrainedMattermostMCPTool([]string{"external__search", "search_users"}))
+	assert.False(t, HasGuardrailConstrainedMattermostMCPTool(nil))
+}

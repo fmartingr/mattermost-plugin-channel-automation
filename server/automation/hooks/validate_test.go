@@ -284,3 +284,93 @@ func TestValidateAllowedTools_AgentEmptyAllowedTools_MissingUserID(t *testing.T)
 	assert.Contains(t, err.Error(), "missing user id")
 	assert.Empty(t, bridge.calls)
 }
+
+func TestValidateCreatorOnlyToolsForTriggerer(t *testing.T) {
+	t.Run("rejects creator-only tool under triggerer", func(t *testing.T) {
+		f := &model.Automation{
+			Trigger: model.Trigger{MessagePosted: &model.MessagePostedConfig{ChannelID: "ch1"}},
+			Actions: []model.Action{{
+				ID: "a1",
+				AIPrompt: &model.AIPromptActionConfig{
+					RequestAs:    "triggerer",
+					AllowedTools: []string{"search_users"},
+				},
+			}},
+		}
+		err := ValidateCreatorOnlyToolsForTriggerer(f)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "requires request_as")
+	})
+
+	t.Run("rejects creator-only tool when request_as unset", func(t *testing.T) {
+		f := &model.Automation{
+			Trigger: model.Trigger{MessagePosted: &model.MessagePostedConfig{ChannelID: "ch1"}},
+			Actions: []model.Action{{
+				ID: "a1",
+				AIPrompt: &model.AIPromptActionConfig{
+					AllowedTools: []string{"add_user_to_channel"},
+				},
+			}},
+		}
+		require.Error(t, ValidateCreatorOnlyToolsForTriggerer(f))
+	})
+
+	t.Run("allows creator-only tool with request_as creator", func(t *testing.T) {
+		f := &model.Automation{
+			Trigger: model.Trigger{MessagePosted: &model.MessagePostedConfig{ChannelID: "ch1"}},
+			Actions: []model.Action{{
+				ID: "a1",
+				AIPrompt: &model.AIPromptActionConfig{
+					RequestAs:    "creator",
+					AllowedTools: []string{"search_users", "create_channel"},
+				},
+			}},
+		}
+		require.NoError(t, ValidateCreatorOnlyToolsForTriggerer(f))
+	})
+
+	t.Run("allows channel-scoped read tools under triggerer", func(t *testing.T) {
+		f := &model.Automation{
+			Trigger: model.Trigger{MessagePosted: &model.MessagePostedConfig{ChannelID: "ch1"}},
+			Actions: []model.Action{{
+				ID: "a1",
+				AIPrompt: &model.AIPromptActionConfig{
+					RequestAs:    "triggerer",
+					AllowedTools: []string{"search_posts", "read_channel"},
+				},
+			}},
+		}
+		require.NoError(t, ValidateCreatorOnlyToolsForTriggerer(f))
+	})
+
+	t.Run("namespaced creator-only tool is rejected", func(t *testing.T) {
+		f := &model.Automation{
+			Actions: []model.Action{{
+				ID: "a1",
+				AIPrompt: &model.AIPromptActionConfig{
+					RequestAs:    "triggerer",
+					AllowedTools: []string{"mattermost__list_agents"},
+				},
+			}},
+		}
+		err := ValidateCreatorOnlyToolsForTriggerer(f)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "list_agents")
+	})
+
+	t.Run("allows creator-only tool for schedule trigger under triggerer", func(t *testing.T) {
+		// Schedule triggers have no triggering user, so request_as always
+		// resolves to the creator and creator-only tools must be permitted.
+		f := &model.Automation{
+			Trigger: model.Trigger{Schedule: &model.ScheduleConfig{ChannelID: "ch1"}},
+			Actions: []model.Action{{
+				ID: "a1",
+				AIPrompt: &model.AIPromptActionConfig{
+					RequestAs:    "triggerer",
+					AllowedTools: []string{"search_users"},
+				},
+			}},
+		}
+		require.NoError(t, ValidateCreatorOnlyToolsForTriggerer(f))
+	})
+}

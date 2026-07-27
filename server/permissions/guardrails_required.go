@@ -7,6 +7,7 @@ import (
 	mmmodel "github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin"
 
+	"github.com/mattermost/mattermost-plugin-channel-automation/server/automation/hooks"
 	"github.com/mattermost/mattermost-plugin-channel-automation/server/model"
 )
 
@@ -28,26 +29,72 @@ import (
 // are no humans (other than the creator) who could see tool output sourced
 // from elsewhere, or no tools that guardrails could meaningfully constrain.
 //
+// triggererID is the user that fired this specific event, or "" when there is
+// none (the create/update path, and schedule/creator-locked triggers). Even in
+// an otherwise-exempt context, a queued event can carry a foreign triggerer
+// while live membership has fallen back to exempt (e.g. the other member left
+// after posting), so an unguarded guardrail-constrained action would still
+// borrow the triggerer's access. When the run resolves to someone other than
+// the creator, guardrails are treated as required.
+//
 // This check intentionally runs after the standard authorization checks so it
 // cannot be used to probe channel types without already being authorized to
 // create automations referencing them.
-func CheckGuardrailsRequired(api plugin.API, f *model.Automation) error {
+func CheckGuardrailsRequired(api plugin.API, f *model.Automation, triggererID string) error {
 	actionIdx, needs := firstAIPromptNeedingGuardrails(f)
 	if !needs {
 		return nil
 	}
-	return checkSensitiveTriggerContext(api, f, actionIdx)
+	if err := checkSensitiveTriggerContext(api, f, actionIdx); err != nil {
+		return err
+	}
+	// Context is exempt for the creator; make sure this queued event actually
+	// resolves to the creator and not a foreign triggerer.
+	return checkExemptTriggerer(f, triggererID)
+}
+
+// checkExemptTriggerer rejects an unguarded guardrail-constrained ai_prompt
+// whose resolved actor is not the automation creator. Actor resolution mirrors
+// ai_prompt.Execute (request_as plus the triggering user) so the two never
+// disagree. triggererID is "" when no triggering user exists.
+func checkExemptTriggerer(f *model.Automation, triggererID string) error {
+	if f == nil {
+		return nil
+	}
+	for i := range f.Actions {
+		ai := f.Actions[i].AIPrompt
+		if ai == nil {
+			continue
+		}
+		if ai.Guardrails != nil && len(ai.Guardrails.Channels) > 0 {
+			continue
+		}
+		if !hooks.HasGuardrailConstrainedMattermostMCPTool(ai.AllowedTools) {
+			continue
+		}
+		actor := f.CreatedBy
+		if ai.RequestAs != model.AIPromptRequestAsCreator && triggererID != "" {
+			actor = triggererID
+		}
+		if actor != f.CreatedBy {
+			return fmt.Errorf("action %d: ai_prompt with guardrail-constrained Mattermost tools and no guardrails can only run as the automation creator (resolved actor %q, creator %q)", i, actor, f.CreatedBy)
+		}
+	}
+	return nil
 }
 
 // firstAIPromptNeedingGuardrails returns the index of the first ai_prompt
-// action with non-empty allowed_tools and missing/empty guardrails.
+// action that includes a guardrail-constrained Mattermost MCP tool but has no
+// guardrails. External tools and unconstrained embedded tools (search_users,
+// list_agents) do not require guardrails, so an action using only those is
+// skipped.
 func firstAIPromptNeedingGuardrails(f *model.Automation) (int, bool) {
 	for i := range f.Actions {
 		ai := f.Actions[i].AIPrompt
 		if ai == nil {
 			continue
 		}
-		if len(ai.AllowedTools) == 0 {
+		if !hooks.HasGuardrailConstrainedMattermostMCPTool(ai.AllowedTools) {
 			continue
 		}
 		if ai.Guardrails != nil && len(ai.Guardrails.Channels) > 0 {

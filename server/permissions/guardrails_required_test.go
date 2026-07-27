@@ -38,9 +38,21 @@ func TestCheckGuardrailsRequired_PublicChannelRequiresGuardrails(t *testing.T) {
 	api := &plugintest.API{}
 	api.On("GetChannel", "ch-pub").Return(&mmmodel.Channel{Id: "ch-pub", Type: mmmodel.ChannelTypeOpen}, nil)
 
-	f := aiPromptAutomation("ch-pub", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-pub", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "public channel")
+}
+
+func TestCheckGuardrailsRequired_NamespacedToolRequiresGuardrails(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("GetChannel", "ch-pub").Return(&mmmodel.Channel{Id: "ch-pub", Type: mmmodel.ChannelTypeOpen}, nil)
+
+	// A namespaced "mattermost__" tool must be recognized as guardrail-constrained.
+	f := aiPromptAutomation("ch-pub", []string{"mattermost__search_posts"}, nil)
+
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "public channel")
 }
@@ -49,9 +61,9 @@ func TestCheckGuardrailsRequired_PublicChannelGuardrailsSetAllowed(t *testing.T)
 	api := &plugintest.API{}
 	api.On("GetChannel", "ch-pub").Return(&mmmodel.Channel{Id: "ch-pub", Type: mmmodel.ChannelTypeOpen}, nil).Maybe()
 
-	f := aiPromptAutomation("ch-pub", []string{"some_tool"}, []string{mmmodel.NewId()})
+	f := aiPromptAutomation("ch-pub", []string{"search_posts"}, []string{mmmodel.NewId()})
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.NoError(t, err)
 }
 
@@ -60,9 +72,9 @@ func TestCheckGuardrailsRequired_PrivateSingleMemberAllowed(t *testing.T) {
 	api.On("GetChannel", "ch-priv").Return(&mmmodel.Channel{Id: "ch-priv", Type: mmmodel.ChannelTypePrivate}, nil)
 	api.On("GetChannelStats", "ch-priv").Return(&mmmodel.ChannelStats{ChannelId: "ch-priv", MemberCount: 1}, nil)
 
-	f := aiPromptAutomation("ch-priv", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-priv", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.NoError(t, err)
 }
 
@@ -71,9 +83,9 @@ func TestCheckGuardrailsRequired_PrivateMultiMemberRequiresGuardrails(t *testing
 	api.On("GetChannel", "ch-priv").Return(&mmmodel.Channel{Id: "ch-priv", Type: mmmodel.ChannelTypePrivate}, nil)
 	api.On("GetChannelStats", "ch-priv").Return(&mmmodel.ChannelStats{ChannelId: "ch-priv", MemberCount: 2}, nil)
 
-	f := aiPromptAutomation("ch-priv", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-priv", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "private channel")
 }
@@ -82,9 +94,9 @@ func TestCheckGuardrailsRequired_GroupMessageRequiresGuardrails(t *testing.T) {
 	api := &plugintest.API{}
 	api.On("GetChannel", "ch-gm").Return(&mmmodel.Channel{Id: "ch-gm", Type: mmmodel.ChannelTypeGroup}, nil)
 
-	f := aiPromptAutomation("ch-gm", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-gm", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "group message")
 }
@@ -98,9 +110,9 @@ func TestCheckGuardrailsRequired_DMWithBotAllowed(t *testing.T) {
 	}, nil)
 	api.On("GetUser", "botuser").Return(&mmmodel.User{Id: "botuser", IsBot: true}, nil)
 
-	f := aiPromptAutomation("ch-dm", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-dm", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.NoError(t, err)
 }
 
@@ -113,9 +125,9 @@ func TestCheckGuardrailsRequired_DMWithUserRequiresGuardrails(t *testing.T) {
 	}, nil)
 	api.On("GetUser", "otheruser").Return(&mmmodel.User{Id: "otheruser", IsBot: false}, nil)
 
-	f := aiPromptAutomation("ch-dm", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-dm", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "direct message")
 }
@@ -127,9 +139,9 @@ func TestCheckGuardrailsRequired_DMSelfAllowed(t *testing.T) {
 		{ChannelId: "ch-dm", UserId: "creator1"},
 	}, nil)
 
-	f := aiPromptAutomation("ch-dm", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-dm", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.NoError(t, err)
 }
 
@@ -141,11 +153,11 @@ func TestCheckGuardrailsRequired_ChannelCreatedTriggerAlwaysRequires(t *testing.
 		Trigger:   model.Trigger{ChannelCreated: &model.ChannelCreatedConfig{TeamID: "team1"}},
 		Actions: []model.Action{{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
 			Prompt: "x", ProviderType: "agent", ProviderID: "ag1",
-			AllowedTools: []string{"some_tool"},
+			AllowedTools: []string{"search_posts"},
 		}}},
 	}
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "channel_created")
 }
@@ -158,11 +170,11 @@ func TestCheckGuardrailsRequired_UserJoinedTeamTriggerAlwaysRequires(t *testing.
 		Trigger:   model.Trigger{UserJoinedTeam: &model.UserJoinedTeamConfig{TeamID: "team1"}},
 		Actions: []model.Action{{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
 			Prompt: "x", ProviderType: "agent", ProviderID: "ag1",
-			AllowedTools: []string{"some_tool"},
+			AllowedTools: []string{"search_posts"},
 		}}},
 	}
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "user_joined_team")
 }
@@ -172,9 +184,55 @@ func TestCheckGuardrailsRequired_NoAllowedToolsAllowed(t *testing.T) {
 
 	f := aiPromptAutomation("ch-pub", nil, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.NoError(t, err)
 	api.AssertNotCalled(t, "GetChannel", "ch-pub")
+}
+
+func TestCheckGuardrailsRequired_ExternalOnlyToolsAllowedInPublic(t *testing.T) {
+	api := &plugintest.API{}
+
+	f := aiPromptAutomation("ch-pub", []string{"external__search", "mattermost__search_users"}, nil)
+
+	// External and unconstrained embedded tools are not guardrail-constrained,
+	// so the context is never classified and no channel lookup occurs.
+	err := CheckGuardrailsRequired(api, f, "")
+	require.NoError(t, err)
+	api.AssertNotCalled(t, "GetChannel", "ch-pub")
+}
+
+func TestCheckGuardrailsRequired_UnconstrainedEmbeddedToolsAllowedInPublic(t *testing.T) {
+	api := &plugintest.API{}
+
+	f := aiPromptAutomation("ch-pub", []string{"search_users", "list_agents"}, nil)
+
+	err := CheckGuardrailsRequired(api, f, "")
+	require.NoError(t, err)
+	api.AssertNotCalled(t, "GetChannel", "ch-pub")
+}
+
+func TestCheckGuardrailsRequired_MixedToolsRequireGuardrailsInPublic(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("GetChannel", "ch-pub").Return(&mmmodel.Channel{Id: "ch-pub", Type: mmmodel.ChannelTypeOpen}, nil)
+
+	// One constrained tool alongside external/unconstrained ones still requires guardrails.
+	f := aiPromptAutomation("ch-pub", []string{"external__search", "search_posts"}, nil)
+
+	err := CheckGuardrailsRequired(api, f, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "public channel")
+}
+
+func TestCheckGuardrailsRequired_MixedNamespacedToolsRequireGuardrailsInPublic(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("GetChannel", "ch-pub").Return(&mmmodel.Channel{Id: "ch-pub", Type: mmmodel.ChannelTypeOpen}, nil)
+
+	// One constrained tool alongside external/unconstrained ones still requires guardrails.
+	f := aiPromptAutomation("ch-pub", []string{"external__search", "mattermost__search_posts"}, nil)
+
+	err := CheckGuardrailsRequired(api, f, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "public channel")
 }
 
 func TestCheckGuardrailsRequired_SendMessageOnlyAutomationAllowed(t *testing.T) {
@@ -188,7 +246,7 @@ func TestCheckGuardrailsRequired_SendMessageOnlyAutomationAllowed(t *testing.T) 
 		}}},
 	}
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.NoError(t, err)
 	api.AssertNotCalled(t, "GetChannel", "ch-pub")
 }
@@ -200,9 +258,9 @@ func TestCheckGuardrailsRequired_GetChannelServerErrorWraps(t *testing.T) {
 		StatusCode: http.StatusInternalServerError,
 	})
 
-	f := aiPromptAutomation("ch-pub", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-pub", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to verify trigger channel")
 
@@ -218,9 +276,9 @@ func TestCheckGuardrailsRequired_GetChannelStatsServerErrorWraps(t *testing.T) {
 		StatusCode: http.StatusInternalServerError,
 	})
 
-	f := aiPromptAutomation("ch-priv", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-priv", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to verify trigger channel members")
 
@@ -236,14 +294,83 @@ func TestCheckGuardrailsRequired_GetChannelMembersServerErrorWraps(t *testing.T)
 		StatusCode: http.StatusInternalServerError,
 	})
 
-	f := aiPromptAutomation("ch-dm", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-dm", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to verify DM members")
 
 	var appErr *mmmodel.AppError
 	assert.True(t, errors.As(err, &appErr), "error should wrap AppError for 5xx classification")
+}
+
+func exemptActorAutomation(requestAs string, allowedTools, guardrailChannelIDs []string) *model.Automation {
+	f := aiPromptAutomation("ch-priv", allowedTools, guardrailChannelIDs)
+	f.Actions[0].AIPrompt.RequestAs = requestAs
+	return f
+}
+
+// exemptPrivateAPI mocks a single-member private trigger channel — the context
+// CheckGuardrailsRequired treats as exempt, so the exempt-triggerer check runs.
+func exemptPrivateAPI() *plugintest.API {
+	api := &plugintest.API{}
+	api.On("GetChannel", "ch-priv").Return(&mmmodel.Channel{Id: "ch-priv", Type: mmmodel.ChannelTypePrivate}, nil).Maybe()
+	api.On("GetChannelStats", "ch-priv").Return(&mmmodel.ChannelStats{ChannelId: "ch-priv", MemberCount: 1}, nil).Maybe()
+	return api
+}
+
+func TestCheckGuardrailsRequired_ExemptForeignTriggererRejected(t *testing.T) {
+	api := exemptPrivateAPI()
+	f := exemptActorAutomation(model.AIPromptRequestAsTriggerer, []string{"search_posts"}, nil)
+
+	err := CheckGuardrailsRequired(api, f, "intruder")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "can only run as the automation creator")
+}
+
+func TestCheckGuardrailsRequired_ExemptCreatorTriggererAllowed(t *testing.T) {
+	api := exemptPrivateAPI()
+	f := exemptActorAutomation(model.AIPromptRequestAsTriggerer, []string{"search_posts"}, nil)
+
+	err := CheckGuardrailsRequired(api, f, "creator1")
+	require.NoError(t, err)
+}
+
+func TestCheckGuardrailsRequired_ExemptRequestAsCreatorAllowed(t *testing.T) {
+	api := exemptPrivateAPI()
+	f := exemptActorAutomation(model.AIPromptRequestAsCreator, []string{"search_posts"}, nil)
+
+	// request_as=creator resolves to the creator regardless of the queued triggerer.
+	err := CheckGuardrailsRequired(api, f, "intruder")
+	require.NoError(t, err)
+}
+
+func TestCheckGuardrailsRequired_ExemptExternalToolsAllowed(t *testing.T) {
+	api := exemptPrivateAPI()
+	f := exemptActorAutomation(model.AIPromptRequestAsTriggerer, []string{"external__search", "search_users"}, nil)
+
+	// No guardrail-constrained Mattermost tool, so neither guardrails nor the
+	// triggerer rule apply.
+	err := CheckGuardrailsRequired(api, f, "intruder")
+	require.NoError(t, err)
+}
+
+func TestCheckGuardrailsRequired_ExemptGuardrailsSkip(t *testing.T) {
+	api := exemptPrivateAPI()
+	f := exemptActorAutomation(model.AIPromptRequestAsTriggerer, []string{"search_posts"}, []string{mmmodel.NewId()})
+
+	// Guardrailed actions are governed by the hooks, not this exempt-context rule.
+	err := CheckGuardrailsRequired(api, f, "intruder")
+	require.NoError(t, err)
+}
+
+func TestCheckGuardrailsRequired_ExemptEmptyTriggererAllowed(t *testing.T) {
+	api := exemptPrivateAPI()
+	f := exemptActorAutomation(model.AIPromptRequestAsTriggerer, []string{"search_posts"}, nil)
+
+	// No triggering user (create/update path, schedule) resolves to the creator.
+	err := CheckGuardrailsRequired(api, f, "")
+	require.NoError(t, err)
 }
 
 func TestCheckGuardrailsRequired_GetUserServerErrorWraps(t *testing.T) {
@@ -258,9 +385,9 @@ func TestCheckGuardrailsRequired_GetUserServerErrorWraps(t *testing.T) {
 		StatusCode: http.StatusInternalServerError,
 	})
 
-	f := aiPromptAutomation("ch-dm", []string{"some_tool"}, nil)
+	f := aiPromptAutomation("ch-dm", []string{"search_posts"}, nil)
 
-	err := CheckGuardrailsRequired(api, f)
+	err := CheckGuardrailsRequired(api, f, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to verify DM participant")
 

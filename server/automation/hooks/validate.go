@@ -3,6 +3,7 @@ package hooks
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/mattermost/mattermost-plugin-agents/public/bridgeclient"
 
@@ -113,6 +114,44 @@ func ValidateAllowedTools(f *model.Automation, userID string, bridge AgentToolsL
 			if hasGuardrails && bare == "get_user_channels" {
 				return fmt.Errorf("action %d: get_user_channels is not permitted when channel guardrails are configured", i)
 			}
+		}
+	}
+	return nil
+}
+
+// CheckCreatorOnlyTools returns an error when allowedTools contains a
+// creator-only tool (a write/enumeration tool that borrows the acting user's
+// authority or cannot be constrained by channel guardrails) while the
+// (triggerType, requestAs) combination could run as the triggerer. The
+// creator-vs-triggerer decision lives entirely in model.ResolvesToTriggerer so
+// the rule is defined once; this function only maps it onto the tool list.
+func CheckCreatorOnlyTools(triggerType, requestAs string, allowedTools []string) error {
+	if !model.ResolvesToTriggerer(triggerType, requestAs) {
+		return nil
+	}
+	for _, name := range allowedTools {
+		bare := strings.TrimPrefix(name, "mattermost__")
+		if IsCreatorOnlyMattermostMCPTool(bare) {
+			return fmt.Errorf("tool %q requires request_as %q (it borrows write authority or cannot be constrained by channel guardrails)", name, model.AIPromptRequestAsCreator)
+		}
+	}
+	return nil
+}
+
+// ValidateCreatorOnlyToolsForTriggerer applies CheckCreatorOnlyTools to every
+// ai_prompt action in the automation, used at create/update time.
+func ValidateCreatorOnlyToolsForTriggerer(f *model.Automation) error {
+	if f == nil {
+		return nil
+	}
+	triggerType := f.Trigger.Type()
+	for i := range f.Actions {
+		ai := f.Actions[i].AIPrompt
+		if ai == nil {
+			continue
+		}
+		if err := CheckCreatorOnlyTools(triggerType, ai.RequestAs, ai.AllowedTools); err != nil {
+			return fmt.Errorf("action %d: %w", i, err)
 		}
 	}
 	return nil

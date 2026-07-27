@@ -97,8 +97,8 @@ func (a *AIPromptAction) Execute(action *model.Action, ctx *model.AutomationCont
 		channelID = ctx.Trigger.Channel.Id
 	}
 
-	if ctx.Trigger.Membership != nil && cfg.RequestAs != model.AIPromptRequestAsCreator {
-		return nil, fmt.Errorf("membership_changed automations must set request_as to %q (found %q); update the automation to continue", model.AIPromptRequestAsCreator, cfg.RequestAs)
+	if _, locked := model.CreatorLockedTriggerTypes[ctx.TriggerType]; locked && cfg.RequestAs != model.AIPromptRequestAsCreator {
+		return nil, fmt.Errorf("%s automations must set request_as to %q (found %q); update the automation to continue", ctx.TriggerType, model.AIPromptRequestAsCreator, cfg.RequestAs)
 	}
 
 	userID := ctx.CreatedBy
@@ -106,6 +106,17 @@ func (a *AIPromptAction) Execute(action *model.Action, ctx *model.AutomationCont
 	if cfg.RequestAs != model.AIPromptRequestAsCreator && ctx.Trigger.User != nil && ctx.Trigger.User.Id != "" {
 		userID = ctx.Trigger.User.Id
 		userIDSource = model.AIPromptRequestAsTriggerer
+	}
+
+	// Never attribute an ai_prompt to a bot — covers both a bot triggerer
+	// (defense in depth after dispatch filters) and a bot creator. Fail closed
+	// on lookup errors so we never proceed with an unverified identity.
+	resolved, appErr := a.api.GetUser(userID)
+	if appErr != nil {
+		return nil, fmt.Errorf("failed to verify ai_prompt user %q: %s", userID, appErr.Error())
+	}
+	if resolved == nil || resolved.IsBot {
+		return nil, fmt.Errorf("ai_prompt cannot run as bot user %q", userID)
 	}
 
 	a.api.LogDebug("AI prompt action: rendered prompt",
@@ -133,6 +144,16 @@ func (a *AIPromptAction) Execute(action *model.Action, ctx *model.AutomationCont
 		}
 		req.AllowedTools = cfg.AllowedTools
 	}
+
+	// Creator-only tools (writes / unguardable enumeration) may not run under
+	// the triggerer's identity. Runs after allowed_tools re-validation so a
+	// blocked or removed tool is reported as such rather than as a request_as
+	// problem. The creator-vs-triggerer rule is shared with the create/update-time
+	// check via model.ResolvesToTriggerer.
+	if err = hooks.CheckCreatorOnlyTools(ctx.TriggerType, cfg.RequestAs, cfg.AllowedTools); err != nil {
+		return nil, err
+	}
+
 	if cfg.Guardrails != nil && len(cfg.Guardrails.Channels) > 0 && len(cfg.AllowedTools) > 0 {
 		toolHooks := make(map[string]bridgeclient.ToolHookConfig, len(cfg.AllowedTools))
 		for _, t := range cfg.AllowedTools {

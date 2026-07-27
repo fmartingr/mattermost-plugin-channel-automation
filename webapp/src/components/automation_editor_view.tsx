@@ -508,9 +508,12 @@ const AutomationEditorView: React.FC = () => {
                         action.ai_prompt.allowed_tools = a.allowed_tool_refs;
                     }
 
-                    // membership_changed automations are locked to the creator server-side;
+                    // Creator-locked triggers require request_as=creator server-side;
                     // mirror that here so the saved config matches enforced behavior.
-                    const requestAs = triggerType === 'membership_changed' ? 'creator' : a.request_as;
+                    const creatorLocked = triggerType === 'membership_changed' ||
+                        triggerType === 'user_joined_team' ||
+                        triggerType === 'channel_created';
+                    const requestAs = creatorLocked ? 'creator' : a.request_as;
                     if (requestAs && action.ai_prompt) {
                         action.ai_prompt.request_as = requestAs;
                     }
@@ -794,15 +797,15 @@ Usage: {{(index .Steps "${action.id || '<action_id>'}").Message}}`}</pre>
                                 <select
                                     id={`action-${index}-request-as`}
                                     style={styles.select}
-                                    value={triggerType === 'membership_changed' ? 'creator' : action.request_as}
-                                    disabled={triggerType === 'membership_changed'}
+                                    value={(triggerType === 'membership_changed' || triggerType === 'user_joined_team' || triggerType === 'channel_created') ? 'creator' : action.request_as}
+                                    disabled={triggerType === 'membership_changed' || triggerType === 'user_joined_team' || triggerType === 'channel_created'}
                                     onChange={(e) => handleActionChange(index, 'request_as', e.target.value)}
                                 >
                                     <option value=''>{'Triggerer (default)'}</option>
                                     <option value='triggerer'>{'Triggerer'}</option>
                                     <option value='creator'>{'Creator'}</option>
                                 </select>
-                                <p style={hintStyle}>{triggerType === 'membership_changed' ? 'Membership change automations always run as the automation creator, because the triggerer is the user whose membership just changed.' : 'Selects which user the AI request is attributed to. "Triggerer" uses the user who triggered the automation (falling back to the creator). "Creator" always uses the automation creator.'}</p>
+                                <p style={hintStyle}>{(triggerType === 'membership_changed' || triggerType === 'user_joined_team' || triggerType === 'channel_created') ? 'This trigger always runs as the automation creator, because the triggerer is an incidental subject of the event (joiner, leaver, or channel creator).' : 'Selects which user the AI request is attributed to. "Triggerer" uses the user who triggered the automation (falling back to the creator). "Creator" always uses the automation creator.'}</p>
                             </div>
                             {action.allowed_tool_refs.length > 0 && (
                                 <div style={styles.formGroup}>

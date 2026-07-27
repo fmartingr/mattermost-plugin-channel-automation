@@ -181,6 +181,18 @@ func (p *Plugin) MessageHasBeenPosted(_ *plugin.Context, post *mmmodel.Post) {
 		return
 	}
 
+	// Defense in depth: from_bot is a convention, not a guarantee. Resolve the
+	// author and drop bot accounts the same way membership_changed does, so a
+	// bot post that somehow lacks the prop cannot become an ai_prompt triggerer.
+	user, appErr := p.API.GetUser(post.UserId)
+	if appErr != nil {
+		p.API.LogError("Failed to get user for message_posted trigger", "user_id", post.UserId, "err", appErr.Error())
+		return
+	}
+	if user.IsBot {
+		return
+	}
+
 	p.dispatcher.Dispatch(&model.Event{
 		Type: model.TriggerTypeMessagePosted,
 		Post: post,

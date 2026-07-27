@@ -155,6 +155,7 @@ func TestExecutor_ChainedAIPromptThenSendMessage(t *testing.T) {
 	}, nil)
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
 	api.On("LogDebug", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+	api.On("GetUser", mock.Anything).Return(&mmmodel.User{Id: "creator1", IsBot: false}, nil)
 
 	// Mock bridge client for AI action
 	bc := &mockBridgeClient{agentResponse: "hello from AI"}

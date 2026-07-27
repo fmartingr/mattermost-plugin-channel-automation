@@ -234,8 +234,14 @@ func (wp *WorkerPool) runWorker(item *model.WorkItem, sem chan struct{}) {
 	}
 
 	// Re-verify guardrail requirements against the current channel state. The
-	// sensitivity of a trigger context can change after creation.
-	if grErr := permissions.CheckGuardrailsRequired(wp.api, f); grErr != nil {
+	// sensitivity of a trigger context can change after creation, and the queued
+	// event may resolve to a foreign triggerer even when live membership has
+	// fallen back to an otherwise-exempt context.
+	var triggererID string
+	if item.TriggerData.User != nil {
+		triggererID = item.TriggerData.User.Id
+	}
+	if grErr := permissions.CheckGuardrailsRequired(wp.api, f, triggererID); grErr != nil {
 		var appErr *mmmodel.AppError
 		if errors.As(grErr, &appErr) {
 			// Transient API error — fail this execution but leave the automation enabled.
@@ -254,9 +260,10 @@ func (wp *WorkerPool) runWorker(item *model.WorkItem, sem chan struct{}) {
 			return
 		}
 
-		// The trigger context became sensitive (e.g. a private channel gained
-		// members) and the automation lacks the now-required guardrails —
-		// disable it to fail closed until the creator reviews and re-saves.
+		// Either the trigger context became sensitive (e.g. a private channel
+		// gained members) or the run resolved to a foreign triggerer — the
+		// automation lacks the now-required guardrails, so disable it to fail
+		// closed until the creator reviews and re-saves.
 		wp.disableAutomation(f, item, fmt.Sprintf("automation now requires guardrails.channel_ids but has none: %s", grErr.Error()))
 		return
 	}
@@ -317,6 +324,34 @@ func (wp *WorkerPool) disableAutomation(f *model.Automation, item *model.WorkIte
 		)
 	}
 	wp.saveExecutionRecord(item, nil, fmt.Errorf("%s", reason), model.NowTimestamp())
+	wp.notifyDisabled(f, item, reason)
+}
+
+// notifyDisabled DMs the automation creator that their automation was turned
+// off and why, via the configured notifier. Safe to call with a nil notifier
+// or nil automation.
+func (wp *WorkerPool) notifyDisabled(f *model.Automation, item *model.WorkItem, reason string) {
+	if wp.notifier == nil || f == nil {
+		return
+	}
+
+	details := notifier.DisabledDetails{
+		AutomationID:   f.ID,
+		AutomationName: f.Name,
+		CreatedBy:      f.CreatedBy,
+		Reason:         reason,
+	}
+	if ch := item.TriggerData.Channel; ch != nil {
+		details.ChannelID = ch.Id
+		// Prefer DisplayName for readability; fall back to Name (handle).
+		if ch.DisplayName != "" {
+			details.ChannelDisplayName = ch.DisplayName
+		} else {
+			details.ChannelDisplayName = ch.Name
+		}
+	}
+
+	wp.notifier.NotifyDisabled(details)
 }
 
 // notifyFailure surfaces the failure to the automation creator via the configured

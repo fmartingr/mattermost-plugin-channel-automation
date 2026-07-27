@@ -355,6 +355,22 @@ func TestMessageHasBeenPosted_SkipsFromBotPosts(t *testing.T) {
 	})
 }
 
+func TestMessageHasBeenPosted_SkipsIsBotUser(t *testing.T) {
+	// Bot account without the from_bot prop — identity check must still drop it.
+	api := &plugintest.API{}
+	api.On("GetUser", "bot-user-id").Return(&mmmodel.User{Id: "bot-user-id", IsBot: true}, nil)
+	api.On("LogError", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return().Maybe()
+
+	p := &Plugin{botUserID: "plugin-bot-id"}
+	p.SetAPI(api)
+
+	post := &mmmodel.Post{UserId: "bot-user-id", ChannelId: "ch1", Message: "hi"}
+	assert.NotPanics(t, func() {
+		p.MessageHasBeenPosted(nil, post)
+	})
+	api.AssertCalled(t, "GetUser", "bot-user-id")
+}
+
 func TestChannelHasBeenCreated_SkipsNonPublicChannels(t *testing.T) {
 	p := &Plugin{botUserID: "bot-id"}
 
