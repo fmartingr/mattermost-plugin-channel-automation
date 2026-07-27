@@ -1684,8 +1684,8 @@ func TestAPI_CreateAutomation_AIPromptAgent_DuplicateID_DedupesCalls(t *testing.
 	// Trigger is channel_created so allowed_tools requires guardrails: stub
 	// the channel-permission checks for the guardrail channel.
 	guardrailChannelID := mmmodel.NewId()
-	api.On("GetChannel", guardrailChannelID).Return(&mmmodel.Channel{Id: guardrailChannelID, TeamId: "team1"}, (*mmmodel.AppError)(nil))
-	api.On("HasPermissionToChannel", "admin1", guardrailChannelID, mmmodel.PermissionReadChannel).Return(true)
+	api.On("GetChannel", guardrailChannelID).Return(&mmmodel.Channel{Id: guardrailChannelID, TeamId: "team1", Type: mmmodel.ChannelTypeOpen}, (*mmmodel.AppError)(nil))
+	api.On("GetChannelMember", guardrailChannelID, "admin1").Return(&mmmodel.ChannelMember{ChannelId: guardrailChannelID, UserId: "admin1"}, (*mmmodel.AppError)(nil))
 
 	body := fmt.Sprintf(`{
 		"name": "AI Automation",

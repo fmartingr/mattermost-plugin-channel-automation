@@ -223,6 +223,18 @@ func TestCheckGuardrailsRequired_MixedToolsRequireGuardrailsInPublic(t *testing.
 	assert.Contains(t, err.Error(), "public channel")
 }
 
+func TestCheckGuardrailsRequired_MixedNamespacedToolsRequireGuardrailsInPublic(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("GetChannel", "ch-pub").Return(&mmmodel.Channel{Id: "ch-pub", Type: mmmodel.ChannelTypeOpen}, nil)
+
+	// One constrained tool alongside external/unconstrained ones still requires guardrails.
+	f := aiPromptAutomation("ch-pub", []string{"external__search", "mattermost__search_posts"}, nil)
+
+	err := CheckGuardrailsRequired(api, f, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "public channel")
+}
+
 func TestCheckGuardrailsRequired_SendMessageOnlyAutomationAllowed(t *testing.T) {
 	api := &plugintest.API{}
 

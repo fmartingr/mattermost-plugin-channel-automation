@@ -185,14 +185,20 @@ Action types:
    - request_as (optional): selects which user the AI completion request — and therefore any
      tool calls made by the agent — is attributed to. Bounded enum, no arbitrary user IDs:
        - "triggerer" (default, also used when omitted): the user who triggered the automation
-         (e.g. the post author for message_posted, the joiner for membership_changed); falls
-         back to the automation creator when the trigger has no associated user (schedule and
-         channel_created triggers always attribute to the creator).
+         (e.g. the post author for message_posted); falls back to the automation creator when
+         the trigger has no associated user.
        - "creator": always the automation creator, regardless of who triggered the run.
      The agent runs with the resolved user's permissions, so picking "creator" in a shared
      channel lets every triggerer exercise the creator's access — only choose "creator" when
      the automation needs to act with the creator's elevated permissions and the user
      understands that. Any other value is rejected at create/update time.
+     REQUEST_AS BY TRIGGER:
+       - message_posted: "triggerer" (the post author) or "creator" — both allowed.
+       - schedule: no triggering user, so the run always attributes to the creator regardless
+         of request_as.
+       - membership_changed, user_joined_team, channel_created: request_as MUST be "creator";
+         "triggerer" or an unset value is rejected at create/update (and legacy automations
+         still set to "triggerer" fail at execution).
      CREATOR-ONLY TOOLS: some built-in Mattermost tools may run ONLY as the creator and are
      rejected (at create/update and execution) when request_as is "triggerer" or unset —
      add_user_to_channel and create_channel (they write on the acting user's behalf), and

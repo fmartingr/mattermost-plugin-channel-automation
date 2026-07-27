@@ -220,22 +220,95 @@ func TestCheckAutomationPermissions_ChannelCreated_GetChannelNotFound(t *testing
 	assert.Contains(t, err.Error(), "not found or not accessible")
 }
 
-func TestCheckGuardrailChannelPermissions_SystemAdminPassesPerChannelCheck(t *testing.T) {
-	// Sysadmins are not short-circuited; they are expected to satisfy
-	// PermissionReadChannel on every guardrail channel via the normal check.
+func TestCheckGuardrailChannelPermissions_SystemAdminDeniedPublicChannelWithoutMembership(t *testing.T) {
+	// A sysadmin implicitly satisfies PermissionReadChannel everywhere, but must
+	// be an actual member to reference a channel in guardrails — otherwise they
+	// could scope guardrails at a public channel in a team they never joined and
+	// extract its contents via the agent. No PermissionReadChannel shortcut.
 	api := &plugintest.API{}
-	api.On("GetChannel", "ch1").Return(&mmmodel.Channel{Id: "ch1"}, nil)
-	api.On("HasPermissionToChannel", "admin1", "ch1", mmmodel.PermissionReadChannel).Return(true)
+	api.On("GetChannel", "ch-pub").Return(&mmmodel.Channel{Id: "ch-pub", Type: mmmodel.ChannelTypeOpen}, nil)
+	api.On("GetChannelMember", "ch-pub", "admin1").Return(nil, &mmmodel.AppError{
+		Message:    "not a member",
+		StatusCode: http.StatusNotFound,
+	})
 
 	f := &model.Automation{
 		Actions: []model.Action{
 			{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
 				Prompt: "p", ProviderType: "agent", ProviderID: "bot",
-				Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{{ChannelID: "ch1"}}},
+				Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{{ChannelID: "ch-pub"}}},
 			}},
 		},
 	}
-	require.NoError(t, CheckGuardrailChannelPermissions(api, "admin1", f))
+	err := CheckGuardrailChannelPermissions(api, "admin1", f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "do not have permission to read")
+	api.AssertNotCalled(t, "HasPermissionToChannel", "admin1", "ch-pub", mmmodel.PermissionReadChannel)
+	api.AssertExpectations(t)
+}
+
+func TestCheckGuardrailChannelPermissions_SystemAdminDeniedPrivateChannelWithoutMembership(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("GetChannel", "ch-priv").Return(&mmmodel.Channel{Id: "ch-priv", Type: mmmodel.ChannelTypePrivate}, nil)
+	api.On("GetChannelMember", "ch-priv", "admin1").Return(nil, &mmmodel.AppError{
+		Message:    "not a member",
+		StatusCode: http.StatusNotFound,
+	})
+
+	f := &model.Automation{
+		Actions: []model.Action{
+			{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
+				Prompt: "p", ProviderType: "agent", ProviderID: "bot",
+				Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{{ChannelID: "ch-priv"}}},
+			}},
+		},
+	}
+	err := CheckGuardrailChannelPermissions(api, "admin1", f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "do not have permission to read")
+	api.AssertNotCalled(t, "HasPermissionToChannel", "admin1", "ch-priv", mmmodel.PermissionReadChannel)
+	api.AssertExpectations(t)
+}
+
+func TestCheckGuardrailChannelPermissions_MemberAllowed(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("GetChannel", "ch-priv").Return(&mmmodel.Channel{Id: "ch-priv", Type: mmmodel.ChannelTypePrivate}, nil)
+	api.On("GetChannelMember", "ch-priv", "user1").Return(&mmmodel.ChannelMember{ChannelId: "ch-priv", UserId: "user1"}, nil)
+
+	f := &model.Automation{
+		Actions: []model.Action{
+			{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
+				Prompt: "p", ProviderType: "agent", ProviderID: "bot",
+				Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{{ChannelID: "ch-priv"}}},
+			}},
+		},
+	}
+	require.NoError(t, CheckGuardrailChannelPermissions(api, "user1", f))
+	api.AssertExpectations(t)
+}
+
+func TestCheckGuardrailChannelPermissions_GetChannelMemberServerError(t *testing.T) {
+	api := &plugintest.API{}
+	api.On("GetChannel", "ch-priv").Return(&mmmodel.Channel{Id: "ch-priv", Type: mmmodel.ChannelTypePrivate}, nil)
+	api.On("GetChannelMember", "ch-priv", "user1").Return(nil, &mmmodel.AppError{
+		Message:    "membership lookup failed",
+		StatusCode: http.StatusInternalServerError,
+	})
+
+	f := &model.Automation{
+		Actions: []model.Action{
+			{ID: "a1", AIPrompt: &model.AIPromptActionConfig{
+				Prompt: "p", ProviderType: "agent", ProviderID: "bot",
+				Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{{ChannelID: "ch-priv"}}},
+			}},
+		},
+	}
+	err := CheckGuardrailChannelPermissions(api, "user1", f)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to verify guardrail channel membership")
+
+	var appErr *mmmodel.AppError
+	assert.True(t, errors.As(err, &appErr), "error should wrap AppError for 5xx classification")
 	api.AssertExpectations(t)
 }
 
@@ -254,10 +327,10 @@ func TestCheckGuardrailChannelPermissions_NoAIPromptOrGuardrails(t *testing.T) {
 
 func TestCheckGuardrailChannelPermissions_AllAccessible(t *testing.T) {
 	api := &plugintest.API{}
-	api.On("GetChannel", "ch1").Return(&mmmodel.Channel{Id: "ch1"}, nil)
-	api.On("GetChannel", "ch2").Return(&mmmodel.Channel{Id: "ch2"}, nil)
-	api.On("HasPermissionToChannel", "user1", "ch1", mmmodel.PermissionReadChannel).Return(true)
-	api.On("HasPermissionToChannel", "user1", "ch2", mmmodel.PermissionReadChannel).Return(true)
+	api.On("GetChannel", "ch1").Return(&mmmodel.Channel{Id: "ch1", Type: mmmodel.ChannelTypeOpen}, nil)
+	api.On("GetChannel", "ch2").Return(&mmmodel.Channel{Id: "ch2", Type: mmmodel.ChannelTypeOpen}, nil)
+	api.On("GetChannelMember", "ch1", "user1").Return(&mmmodel.ChannelMember{ChannelId: "ch1", UserId: "user1"}, nil)
+	api.On("GetChannelMember", "ch2", "user1").Return(&mmmodel.ChannelMember{ChannelId: "ch2", UserId: "user1"}, nil)
 
 	f := &model.Automation{
 		Actions: []model.Action{
@@ -273,10 +346,13 @@ func TestCheckGuardrailChannelPermissions_AllAccessible(t *testing.T) {
 	api.AssertExpectations(t)
 }
 
-func TestCheckGuardrailChannelPermissions_MissingReadPermissionDenied(t *testing.T) {
+func TestCheckGuardrailChannelPermissions_NonMemberDenied(t *testing.T) {
 	api := &plugintest.API{}
-	api.On("GetChannel", "ch-secret").Return(&mmmodel.Channel{Id: "ch-secret"}, nil)
-	api.On("HasPermissionToChannel", "user1", "ch-secret", mmmodel.PermissionReadChannel).Return(false)
+	api.On("GetChannel", "ch-secret").Return(&mmmodel.Channel{Id: "ch-secret", Type: mmmodel.ChannelTypeOpen}, nil)
+	api.On("GetChannelMember", "ch-secret", "user1").Return(nil, &mmmodel.AppError{
+		Message:    "not a member",
+		StatusCode: http.StatusNotFound,
+	})
 
 	f := &model.Automation{
 		Actions: []model.Action{
@@ -339,8 +415,8 @@ func TestCheckGuardrailChannelPermissions_GetChannelNotFoundDenied(t *testing.T)
 
 func TestCheckGuardrailChannelPermissions_DuplicateChannelsDeduped(t *testing.T) {
 	api := &plugintest.API{}
-	api.On("GetChannel", "ch1").Return(&mmmodel.Channel{Id: "ch1"}, nil).Once()
-	api.On("HasPermissionToChannel", "user1", "ch1", mmmodel.PermissionReadChannel).Return(true).Once()
+	api.On("GetChannel", "ch1").Return(&mmmodel.Channel{Id: "ch1", Type: mmmodel.ChannelTypeOpen}, nil).Once()
+	api.On("GetChannelMember", "ch1", "user1").Return(&mmmodel.ChannelMember{ChannelId: "ch1", UserId: "user1"}, nil).Once()
 
 	f := &model.Automation{
 		Actions: []model.Action{

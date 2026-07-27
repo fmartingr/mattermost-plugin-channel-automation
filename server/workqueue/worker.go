@@ -324,6 +324,34 @@ func (wp *WorkerPool) disableAutomation(f *model.Automation, item *model.WorkIte
 		)
 	}
 	wp.saveExecutionRecord(item, nil, fmt.Errorf("%s", reason), model.NowTimestamp())
+	wp.notifyDisabled(f, item, reason)
+}
+
+// notifyDisabled DMs the automation creator that their automation was turned
+// off and why, via the configured notifier. Safe to call with a nil notifier
+// or nil automation.
+func (wp *WorkerPool) notifyDisabled(f *model.Automation, item *model.WorkItem, reason string) {
+	if wp.notifier == nil || f == nil {
+		return
+	}
+
+	details := notifier.DisabledDetails{
+		AutomationID:   f.ID,
+		AutomationName: f.Name,
+		CreatedBy:      f.CreatedBy,
+		Reason:         reason,
+	}
+	if ch := item.TriggerData.Channel; ch != nil {
+		details.ChannelID = ch.Id
+		// Prefer DisplayName for readability; fall back to Name (handle).
+		if ch.DisplayName != "" {
+			details.ChannelDisplayName = ch.DisplayName
+		} else {
+			details.ChannelDisplayName = ch.Name
+		}
+	}
+
+	wp.notifier.NotifyDisabled(details)
 }
 
 // notifyFailure surfaces the failure to the automation creator via the configured
