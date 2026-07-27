@@ -1,4 +1,4 @@
-# Channel Automation Plugin for Mattermost
+# Channel Automation Plugin for Mattermost (Beta)
 
 [![Build Status](https://github.com/mattermost/mattermost-plugin-channel-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/mattermost/mattermost-plugin-channel-automation/actions/workflows/ci.yml)
 [![E2E Status](https://github.com/mattermost/mattermost-plugin-channel-automation/actions/workflows/e2e.yml/badge.svg)](https://github.com/mattermost/mattermost-plugin-channel-automation/actions/workflows/e2e.yml)

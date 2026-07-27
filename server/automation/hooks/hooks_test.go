@@ -102,6 +102,11 @@ func testRouter(t *testing.T, store *mockAutomationStore, api *plugintest.API) *
 	api.On("LogWarn",
 		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return().Maybe()
+	// The allowed_tools rejection logs msg + automation_id + action_id + tool_name.
+	api.On("LogWarn",
+		mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, mock.Anything,
+	).Return().Maybe()
 	api.On("HasPermissionTo", mock.AnythingOfType("string"), mmmodel.PermissionManageSystem).Return(false).Maybe()
 	api.On("GetChannel", chAllow).Return(&mmmodel.Channel{Id: chAllow, TeamId: teamAutomation, Type: mmmodel.ChannelTypeOpen}, (*mmmodel.AppError)(nil)).Maybe()
 	// Default channel-member stubs match the trigger semantics (membership only).
@@ -166,8 +171,14 @@ func guardrailAutomationWithRequestAs(requestAs string) *model.Automation {
 			{
 				ID: "ai1",
 				AIPrompt: &model.AIPromptActionConfig{
-					RequestAs:    requestAs,
-					AllowedTools: []string{"search_posts"},
+					RequestAs: requestAs,
+					// Allowlist every tool the shared before-hook tests exercise.
+					AllowedTools: []string{
+						"search_posts", "search_users", "read_channel",
+						"get_channel_info", "get_channel_members",
+						"add_user_to_channel", "create_channel",
+						"get_user_channels", "read_post", "get_team_members",
+					},
 					Guardrails: &model.Guardrails{Channels: []model.GuardrailChannel{
 						{ChannelID: chAllow, TeamID: teamAutomation},
 					}},
@@ -481,7 +492,10 @@ func TestHooks_Before_MattermostToolNotSupportedByGuardrails(t *testing.T) {
 }
 
 func TestHooks_Before_UnrecognizedToolRejected(t *testing.T) {
-	store := &mockAutomationStore{automations: map[string]*model.Automation{"auto1": guardrailAutomation()}}
+	// Allowlist the tool so it reaches the catalog lookup this test exercises.
+	f := guardrailAutomation()
+	f.Actions[0].AIPrompt.AllowedTools = append(f.Actions[0].AIPrompt.AllowedTools, "some_external_or_typo_tool")
+	store := &mockAutomationStore{automations: map[string]*model.Automation{"auto1": f}}
 	api := &plugintest.API{}
 	r := testRouter(t, store, api)
 
@@ -493,6 +507,104 @@ func TestHooks_Before_UnrecognizedToolRejected(t *testing.T) {
 	require.Equal(t, http.StatusOK, code)
 	assert.NotEmpty(t, resp.Error)
 	assert.Contains(t, resp.Error, "not a known Mattermost MCP server tool")
+}
+
+// A catalog tool with a Before hook is rejected when not in allowed_tools.
+func TestHooks_Before_ToolNotInAllowedTools(t *testing.T) {
+	f := guardrailAutomation()
+	f.Actions[0].AIPrompt.AllowedTools = []string{"search_posts"}
+	store := &mockAutomationStore{automations: map[string]*model.Automation{"auto1": f}}
+	api := &plugintest.API{}
+	r := testRouter(t, store, api)
+
+	code, resp := postBefore(t, r, "auto1", "ai1", mcptool.BeforeHookRequest{
+		ToolName: "read_channel",
+		Args:     argsJSON(t, map[string]any{"channel_id": chAllow}),
+		UserID:   "user1",
+	})
+	require.Equal(t, http.StatusOK, code)
+	assert.Contains(t, resp.Error, "not in this automation action's allowed_tools")
+}
+
+// A catalog tool marked not permitted is rejected even if allowlisted.
+func TestHooks_Before_DisallowedCatalogToolRejected(t *testing.T) {
+	f := guardrailAutomation()
+	f.Actions[0].AIPrompt.AllowedTools = []string{"create_post"}
+	store := &mockAutomationStore{automations: map[string]*model.Automation{"auto1": f}}
+	api := &plugintest.API{}
+	r := testRouter(t, store, api)
+
+	code, resp := postBefore(t, r, "auto1", "ai1", mcptool.BeforeHookRequest{
+		ToolName: "create_post",
+		Args:     argsJSON(t, map[string]any{}),
+		UserID:   "user1",
+	})
+	require.Equal(t, http.StatusOK, code)
+	assert.Contains(t, resp.Error, "not permitted in automations")
+}
+
+// A namespaced tool_name resolves against the bare-keyed catalog AND runs its
+// before-hook: the allowed channel passes while a non-guardrail channel is
+// rejected by read_channel's hook (which only happens if the hook executes).
+func TestHooks_Before_NamespacedToolNameResolvesCatalogAndRunsHook(t *testing.T) {
+	f := guardrailAutomation()
+	f.Actions[0].AIPrompt.AllowedTools = []string{"mattermost__read_channel"}
+	store := &mockAutomationStore{automations: map[string]*model.Automation{"auto1": f}}
+	api := &plugintest.API{}
+	r := testRouter(t, store, api)
+
+	code, resp := postBefore(t, r, "auto1", "ai1", mcptool.BeforeHookRequest{
+		ToolName: "mattermost__read_channel",
+		Args:     argsJSON(t, map[string]any{"channel_id": chAllow}),
+		UserID:   "user1",
+	})
+	require.Equal(t, http.StatusOK, code)
+	assert.Empty(t, resp.Error)
+
+	// A channel outside the guardrails must be rejected by read_channel's
+	// before-hook; this fails if the namespaced name skipped entry.Before.
+	code, resp = postBefore(t, r, "auto1", "ai1", mcptool.BeforeHookRequest{
+		ToolName: "mattermost__read_channel",
+		Args:     argsJSON(t, map[string]any{"channel_id": chDeny}),
+		UserID:   "user1",
+	})
+	require.Equal(t, http.StatusOK, code)
+	assert.Contains(t, resp.Error, "not permitted")
+	assert.Contains(t, resp.Error, chDeny)
+}
+
+// A namespaced allowed_tools entry authorizes the bare tool name the bridge sends.
+func TestHooks_Before_NamespacedAllowedToolMatchesBareHookName(t *testing.T) {
+	f := guardrailAutomation()
+	f.Actions[0].AIPrompt.AllowedTools = []string{"mattermost__read_channel"}
+	store := &mockAutomationStore{automations: map[string]*model.Automation{"auto1": f}}
+	api := &plugintest.API{}
+	r := testRouter(t, store, api)
+
+	code, resp := postBefore(t, r, "auto1", "ai1", mcptool.BeforeHookRequest{
+		ToolName: "read_channel",
+		Args:     argsJSON(t, map[string]any{"channel_id": chAllow}),
+		UserID:   "user1",
+	})
+	require.Equal(t, http.StatusOK, code)
+	assert.Empty(t, resp.Error)
+}
+
+// An external tool sharing a bare name does not satisfy the allowed_tools gate.
+func TestHooks_Before_ExternalToolWithCollidingBareNameRejected(t *testing.T) {
+	f := guardrailAutomation()
+	f.Actions[0].AIPrompt.AllowedTools = []string{"external__read_channel"}
+	store := &mockAutomationStore{automations: map[string]*model.Automation{"auto1": f}}
+	api := &plugintest.API{}
+	r := testRouter(t, store, api)
+
+	code, resp := postBefore(t, r, "auto1", "ai1", mcptool.BeforeHookRequest{
+		ToolName: "read_channel",
+		Args:     argsJSON(t, map[string]any{"channel_id": chAllow}),
+		UserID:   "user1",
+	})
+	require.Equal(t, http.StatusOK, code)
+	assert.Contains(t, resp.Error, "not in this automation action's allowed_tools")
 }
 
 func TestHooks_GuardrailsNotFound_MissingAutomation(t *testing.T) {

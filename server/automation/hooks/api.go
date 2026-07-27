@@ -170,25 +170,37 @@ func (h *APIHandler) callerCanTriggerAutomation(callerID string, f *model.Automa
 	return handler.CallerCanTrigger(h.api, &f.Trigger, callerID)
 }
 
-// loadGuardrailAutomation loads the automation, guardrails, and ai_prompt request_as for the
-// given action when channel guardrails are configured.
-func (h *APIHandler) loadGuardrailAutomation(automationID, actionID string) (*model.Automation, *model.Guardrails, string, bool) {
+// loadGuardrailAutomation returns the automation and its ai_prompt config for
+// the given action when channel guardrails are configured.
+func (h *APIHandler) loadGuardrailAutomation(automationID, actionID string) (*model.Automation, *model.AIPromptActionConfig, bool) {
 	f, err := h.store.Get(automationID)
 	if err != nil || f == nil {
-		return nil, nil, "", false
+		return nil, nil, false
 	}
 	for i := range f.Actions {
 		act := &f.Actions[i]
 		if act.ID != actionID || act.AIPrompt == nil || act.AIPrompt.Guardrails == nil {
 			continue
 		}
-		gr := act.AIPrompt.Guardrails
-		if gr == nil || len(gr.Channels) == 0 {
+		if len(act.AIPrompt.Guardrails.Channels) == 0 {
 			continue
 		}
-		return f, gr, act.AIPrompt.RequestAs, true
+		return f, act.AIPrompt, true
 	}
-	return nil, nil, "", false
+	return nil, nil, false
+}
+
+// actionAllowsTool reports whether toolName is in allowed_tools, comparing both
+// sides by their bare catalog name so bare and namespaced forms match while
+// external tools sharing a bare name do not.
+func actionAllowsTool(allowedTools []string, toolName string) bool {
+	want := BareMattermostMCPToolName(toolName)
+	for _, t := range allowedTools {
+		if BareMattermostMCPToolName(t) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // automationAnchorTeamID returns the Mattermost team ID the automation is anchored to:
@@ -251,14 +263,14 @@ func (h *APIHandler) handleBefore(w http.ResponseWriter, r *http.Request) {
 	automationID := vars["automation_id"]
 	actionID := vars["action_id"]
 
-	f, gr, requestAs, ok := h.loadGuardrailAutomation(automationID, actionID)
+	f, ai, ok := h.loadGuardrailAutomation(automationID, actionID)
 	if !ok {
 		writeJSON(w, http.StatusOK, mcptool.BeforeHookResponse{Error: "guardrails not found"})
 		return
 	}
 
 	callerID := r.Header.Get(headerMattermostUserID)
-	if !h.authorizeHookCaller(callerID, f, requestAs) {
+	if !h.authorizeHookCaller(callerID, f, ai.RequestAs) {
 		h.api.LogWarn("hooks: unauthorized hook caller",
 			"automation_id", f.ID,
 			"caller_id", callerID,
@@ -273,11 +285,31 @@ func (h *APIHandler) handleBefore(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, mcptool.BeforeHookResponse{Error: "tool_name is required"})
 		return
 	}
+
+	if !actionAllowsTool(ai.AllowedTools, req.ToolName) {
+		h.api.LogWarn("hooks: tool not in action allowed_tools",
+			"automation_id", f.ID,
+			"action_id", actionID,
+			"tool_name", req.ToolName,
+		)
+		writeJSON(w, http.StatusOK, mcptool.BeforeHookResponse{
+			Error: fmt.Sprintf("tool %q is not in this automation action's allowed_tools", req.ToolName),
+		})
+		return
+	}
+
 	entry, catOK := LookupMattermostMCPTool(req.ToolName)
 	if !catOK {
 		writeJSON(w, http.StatusOK, mcptool.BeforeHookResponse{
 			Error: fmt.Sprintf("tool %q is not a known Mattermost MCP server tool; channel guardrails reject unrecognized tools",
 				req.ToolName),
+		})
+		return
+	}
+
+	if !entry.Allowed {
+		writeJSON(w, http.StatusOK, mcptool.BeforeHookResponse{
+			Error: fmt.Sprintf("tool %q is not permitted in automations", req.ToolName),
 		})
 		return
 	}
@@ -297,7 +329,7 @@ func (h *APIHandler) handleBefore(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	allowedCh, allowedTeams := h.allowedSetsForGuardrails(gr, automationID, actionID)
+	allowedCh, allowedTeams := h.allowedSetsForGuardrails(ai.Guardrails, automationID, actionID)
 	if expTeam, err := automationAnchorTeamID(h.api, f); err != nil {
 		h.api.LogDebug("hooks: failed to resolve automation anchor team",
 			"automation_id", automationID, "action_id", actionID, "error", err.Error())
@@ -306,7 +338,7 @@ func (h *APIHandler) handleBefore(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := HookCtx{
-		Guardrails:   gr,
+		Guardrails:   ai.Guardrails,
 		AllowedCh:    allowedCh,
 		AllowedTeams: allowedTeams,
 		API:          h.api,

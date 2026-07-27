@@ -18,6 +18,7 @@ import (
 // mockBridgeClient implements action.BridgeClient for executor tests.
 type mockBridgeClient struct {
 	agentResponse string
+	agentTools    []bridgeclient.BridgeToolInfo
 	lastReq       bridgeclient.CompletionRequest
 }
 
@@ -32,7 +33,7 @@ func (m *mockBridgeClient) ServiceCompletion(_ string, req bridgeclient.Completi
 }
 
 func (m *mockBridgeClient) GetAgentTools(_, _ string) ([]bridgeclient.BridgeToolInfo, error) {
-	return nil, nil
+	return m.agentTools, nil
 }
 
 func TestExecutor_SingleAction(t *testing.T) {
